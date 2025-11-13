@@ -3,20 +3,6 @@ import feedparser
 import os 
 
 
-def search_semantic_scholar(query, limit=50, api_key=None):
-    base_url = "https://api.semanticscholar.org/graph/v1/paper/search"
-    fields = "title,abstract,authors,year,venue,citationCount,externalIds"
-    params = {"query": query, "limit": limit, "fields": fields}
-    headers = {"x-api-key": api_key} if api_key else {}
-    res = requests.get(base_url, params=params, headers=headers)
-    if res.status_code == 429:
-        print("Semantic Scholar: Rate limit exceeded. Register for an API key at https://www.semanticscholar.org/product/api#api-key-form")
-        return res.json()
-    elif res.status_code != 200:
-        print(f"Semantic Scholar: Error {res.status_code} - {res.text}")
-        return res.json()
-    return res.json()
-
 # parse arvix 
 def search_arxiv(query):
     base_url = "http://export.arxiv.org/api/query"
@@ -91,3 +77,4 @@ if __name__ == "__main__":
     print("\nSearch: CrossRef")
     crossref_data = search_crossref("10.1038/s41586-019-1666-5")
     print(format_crossref_results(crossref_data))
+
