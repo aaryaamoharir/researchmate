@@ -13,9 +13,7 @@ from ChunkAndMap import PaperMetadata
 
 @dataclass
 class SubQuestion:
-    """
-    Represents a sub-question decomposed from the original query
-    """
+    
     id: str
     text: str
     paper_needed: Optional[str] = None  # "BERT", "GPT-2", etc.
@@ -30,9 +28,7 @@ class SubQuestion:
 
 
 class AgentState(TypedDict):
-    """
-    State shared across all nodes in the agent graph
-    """
+    
     # User input
     original_query: str
     
@@ -57,9 +53,7 @@ class AgentState(TypedDict):
 
 
 def create_initial_state(query: str) -> AgentState:
-    """
-    Create initial state from user query
-    """
+ 
     return AgentState(
         original_query=query,
         sub_questions=[],
@@ -75,9 +69,7 @@ def create_initial_state(query: str) -> AgentState:
 
 
 def get_current_question(state: AgentState) -> Optional[SubQuestion]:
-    """
-    Get the currently active sub-question
-    """
+    
     if not state['current_sub_question_id']:
         return None
     
@@ -89,21 +81,15 @@ def get_current_question(state: AgentState) -> Optional[SubQuestion]:
 
 
 def get_pending_questions(state: AgentState) -> List[SubQuestion]:
-    """
-    Get all pending sub-questions
-    """
+  
     return [sq for sq in state['sub_questions'] if sq.status == "pending"]
 
 
 def get_completed_questions(state: AgentState) -> List[SubQuestion]:
-    """
-    Get all completed sub-questions
-    """
+    
     return [sq for sq in state['sub_questions'] if sq.status == "complete"]
 
 
 def get_failed_questions(state: AgentState) -> List[SubQuestion]:
-    """
-    Get all failed sub-questions
-    """
+    
     return [sq for sq in state['sub_questions'] if sq.status == "failed"]
