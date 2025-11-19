@@ -23,7 +23,7 @@ class QATool:
     def _ensure_agent(self):
         """Lazy load the QA agent"""
         if self.agent is None:
-            print("\n🤖 Initializing QA Agent...")
+            print("\nInitializing QA Agent...")
             self.agent = PaperQAAgent(self.model_name)
     
     def chunk_text(self, pages_data: List[Dict], chunk_size: int = 400, overlap: int = 50) -> List[PaperChunk]:

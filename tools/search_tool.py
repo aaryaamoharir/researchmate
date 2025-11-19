@@ -27,7 +27,7 @@ class SearchTool:
         Returns:
             List of PaperMetadata objects from all sources
         """
-        print(f"\n🔍 Searching for: '{query}'")
+        print(f"\nSearching for: '{query}'")
         results = self.api.search_all(query)
         
         # Flatten results from all sources
