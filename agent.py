@@ -1,4 +1,3 @@
-"""LangGraph chat agent with hybrid retrieval and Groq LLM."""
 
 import os
 from dotenv import load_dotenv
@@ -107,7 +106,6 @@ Answer:"""
 
 
 def build_agent():
-    """Build and compile the LangGraph agent."""
     graph = StateGraph(State)
 
     graph.add_node("retrieve", retrieve)
@@ -126,7 +124,6 @@ agent = build_agent()
 
 
 def chat(query: str) -> str:
-    """Run a chat query through the agent."""
     result = agent.invoke({
         "query": query,
         "text_results": [],

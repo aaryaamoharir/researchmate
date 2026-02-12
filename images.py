@@ -1,4 +1,3 @@
-"""Extract figures and diagrams from PDF files."""
 
 import fitz  # PyMuPDF
 from PIL import Image
