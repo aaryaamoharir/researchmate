@@ -72,16 +72,12 @@ export default function SignIn() {
             </button>
           </form>
 
-          <div className="mt-6 text-center">
-            <a href="#" className="text-sm text-indigo-600 hover:underline">
-              Forgot your password?
-            </a>
-          </div>
+          
 
           <div className="mt-8 pt-6 border-t border-gray-200 text-center">
             <p className="text-sm text-gray-600">
               Don't have an account?{' '}
-              <a href="#" className="text-indigo-600 font-semibold hover:underline">
+              <a href="signup" className="text-indigo-600 font-semibold hover:underline">
                 Sign up
               </a>
             </p>

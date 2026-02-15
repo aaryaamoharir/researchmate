@@ -31,15 +31,15 @@ export default function SignUp() {
 
     // For demo - replace with actual registration
     console.log('Signing up:', { name, email });
-    navigate('/dashboard');
+    navigate('/signup');
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-pink-500 via-purple-500 to-indigo-500 flex items-center justify-center p-4">
-      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
+    <div className="min-h-screen bg-gradient-to-br from-blue-200 via-indigo-900 to-blue-900 flex items-center justify-center p-4">
+    <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="text-5xl mb-4">✨</div>
-          <h1 className="text-3xl font-bold text-gray-800">Create Account</h1>
+          <div className="text-5xl mb-4">🥼</div>
+          <h1 className="text-3xl font-serif font-bold text-gray-800">Create Account</h1>
           <p className="text-gray-600 mt-2">Sign up to get started</p>
         </div>
 
@@ -104,7 +104,7 @@ export default function SignUp() {
 
           <button
             type="submit"
-            className="w-full bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
+            className="w-full font-serif bg-purple-600 text-white py-3 rounded-lg font-semibold hover:bg-purple-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
           >
             Create Account
           </button>
