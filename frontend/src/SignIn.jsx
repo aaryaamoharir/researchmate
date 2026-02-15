@@ -19,6 +19,10 @@ export default function SignIn() {
     }
 
     //would need to add a check here to see if the sign in is in the database and then i can set isSignedIn() to true 
+    setIsSignedIn(true);
+
+  // redirect to dashboard
+  navigate("/dashboard");
   };
 
   if (!isSignedIn) {
@@ -64,12 +68,13 @@ export default function SignIn() {
               </div>
             )}
 
-            <button
-              type="submit"
-              className="w-full bg-indigo-600 text-white py-3 font-serif rounded-lg font-semibold hover:bg-indigo-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
-            >
-              Sign In
-            </button>
+<button
+  type="submit"
+  className="w-full bg-indigo-600 text-white py-3 font-serif rounded-lg font-semibold hover:bg-indigo-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
+>
+  Sign In
+</button>
+
           </form>
 
           
