@@ -7,6 +7,7 @@ from typing import List, Optional
 from pydantic import BaseModel, ConfigDict
 from datetime import datetime
 import uuid
+from uuid import UUID as PyUUID
 import shutil
 import fitz
 import os
@@ -26,7 +27,6 @@ load_dotenv()
 # Initialize Supabase client for Authentication
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # Initialize SQLAlchemy for Database Operations
@@ -55,8 +55,7 @@ class Summary(Base):
     #Create a model used var as well
 
 
-
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 
 def get_db():
@@ -90,41 +89,61 @@ class UserProfileResponse(BaseModel):
 
 #Helper function for token verification
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    
+    """
+    Verify token using Supabase Auth API.
+    """
     try:
-        # Get token from credentials
         token = credentials.credentials
         
-        # Decode and verify the JWT token
-        payload = jwt.decode(
-            token, 
-            SUPABASE_JWT_SECRET, 
-            algorithms=["HS256"],
-            audience="authenticated"
-        )
+        print("=" * 60)
+        print("TOKEN VERIFICATION DEBUG")
+        print("=" * 60)
+        print(f"Token received (first 50): {token[:50]}...")
+        print(f"Token length: {len(token)}")
         
-        return payload  # Contains 'sub' (user_id), 'email', etc.
-    
-    except JWTError as e:
+        # Try to get user from Supabase
+        print("Calling supabase.auth.get_user()...")
+        user_response = supabase.auth.get_user(token)
+        
+        print(f"Response type: {type(user_response)}")
+        print(f"Has user: {hasattr(user_response, 'user')}")
+        
+        if user_response and user_response.user:
+            print(f"✅ User found: {user_response.user.email}")
+            print("=" * 60)
+            
+            return {
+                "sub": str(user_response.user.id),
+                "email": user_response.user.email,
+                "user_metadata": user_response.user.user_metadata or {}
+            }
+        else:
+            print("❌ No user in response")
+            print(f"Full response: {user_response}")
+            print("=" * 60)
+            raise HTTPException(status_code=401, detail="Invalid token - no user found")
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Exception occurred: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print("=" * 60)
         raise HTTPException(
             status_code=401,
-            detail="Invalid or expired token"
+            detail=f"Token verification failed: {str(e)}"
         )
   
 @app.post("/auth/signup", response_model=AuthResponse)
 def signup(signup_data: SignUpRequest):
-    """
-    Create new user account in Supabase Auth.
-    Stores name in user metadata.
-    """
-    try:
+
         # use sign up with supabase
         auth_response = supabase.auth.sign_up({
             "email": signup_data.email,
             "password": signup_data.password,
             "options": {
                 "data": {
-                    "name": signup_data.name  # Store name in database
+                    "name": signup_data.name  # store name in database
                 }
             }
         })
@@ -140,9 +159,6 @@ def signup(signup_data: SignUpRequest):
             email=auth_response.user.email,
             name=user_name
         )
-    
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/auth/login", response_model=AuthResponse)
 def login(login_data: LoginRequest):
@@ -173,28 +189,19 @@ def login(login_data: LoginRequest):
 @app.get("/auth/me", response_model=UserProfileResponse)
 def get_current_user(current_user = Depends(verify_token)):
     
-    try:
-        # get user info from supabase auth
-        user = supabase.auth.get_user()
-        
-        if not user.user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        return UserProfileResponse(
-            id=str(user.user.id),
-            email=user.user.email,
-            name=user.user.user_metadata.get("name", ""),
-            created_at=user.user.created_at
-        )
+    return UserProfileResponse(
+        id=current_user["sub"],
+        email=current_user["email"],
+        name=current_user["user_metadata"].get("name", ""),
+        created_at=str(datetime.utcnow())  # Or get from token if available
+    )
     
-    except Exception as e:
-        raise HTTPException(status_code=404, detail="User not found")
 
 #PDF Data Contracts
 class PDFResponse(BaseModel):
     id : int
     file_name : str
-    user_id: str
+    user_id: PyUUID
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
@@ -235,7 +242,7 @@ def get_my_pdfs(current_user = Depends(verify_token), db: Session = Depends(get_
 #    pdfs = db.query(PDF).offset(skip).limit(limit).all()
 #    return pdfs
 
-#Return certain PDF data with ID(metadata)
+#Return certain PDF data with the user id
 @app.get("/pdf/{id}", response_model=PDFResponse)
 def read_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
     pdf = db.query(PDF).filter(PDF.id == id).first()
