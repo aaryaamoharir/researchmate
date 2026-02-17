@@ -18,7 +18,22 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
 
+from fastapi.middleware.cors import CORSMiddleware
+
+
+
+
+
 app = FastAPI()
+
+# Add this right after app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 security = HTTPBearer()
 

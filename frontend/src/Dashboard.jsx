@@ -1,15 +1,47 @@
 import React, { useState } from 'react';
 import { Upload, MessageCircle } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
-import { uploadPDF } from "../api";
+
 
 export default function Dashboard() {
   const [uploadedFile, setUploadedFile] = useState(null);
+  const [pdfId, setPdfId] = useState(null);
 
-  const handleFileUpload = (event) => {
+  const handleFileUpload = async (event) => {
     const file = event.target.files[0];
-    if (file && file.type === 'application/pdf') {
-      setUploadedFile(file);
+    if (!file || file.type !== 'application/pdf') return;
+  
+    setUploadedFile(file);
+  
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+  
+      const token = localStorage.getItem('access_token');
+  
+      const response = await fetch('http://localhost:8000/pdf/upload', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          // Note: do NOT set Content-Type here — the browser sets it automatically for FormData
+        },
+        body: formData,
+      });
+  
+      if (!response.ok) {
+        const errorData = await response.json();
+        console.error('Upload failed:', errorData.detail);
+        return;
+      }
+  
+      const data = await response.json();
+      console.log('Upload successful, PDF id:', data.id);
+  
+      // Save the pdf id so you can request a summary later
+      setPdfId(data.id);
+  
+    } catch (err) {
+      console.error('Something went wrong:', err);
     }
   };
 

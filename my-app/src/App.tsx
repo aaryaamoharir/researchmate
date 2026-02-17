@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 
-import { BrowserRouter, Routes, Route, Link, Navigate } from 'react-router-dom';
 export default function App() {
   const [isSignedIn, setIsSignedIn] = useState(false);
   const [email, setEmail] = useState('');
@@ -17,7 +16,7 @@ export default function App() {
       return;
     }
 
-    // add authentication here and then turn isSignedIn to true 
+    // add authentication here and then turn isSignedIn to ture 
   };
 
   if (!isSignedIn) {
@@ -80,9 +79,9 @@ export default function App() {
           <div className="mt-8 pt-6 border-t border-gray-200 text-center">
             <p className="text-sm text-gray-600">
               Don't have an account?{' '}
-              <Link to="/SignUp" className="text-indigo-600 font-semibold hover:underline">
-              Sign up
-            </Link>
+              <a href="#" className="text-indigo-600 font-semibold hover:underline">
+                Sign up
+              </a>
             </p>
           </div>
         </div>

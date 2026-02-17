@@ -9,7 +9,7 @@ export default function SignUp() {
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  const handleSignUp = (e) => {
+  const handleSignUp = async (e) => {
     e.preventDefault();
     setError('');
 
@@ -29,10 +29,37 @@ export default function SignUp() {
       return;
     }
 
-    // For demo - replace with actual registration
+    try {
+      const response = await fetch('http://localhost:8000/auth/signup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name, email, password }),
+      });
+      if (!response.ok) {
+        const errorData = await response.json();
+        setError(errorData.detail || 'Failed to create account');
+        return;
+      }
+  
+      const data = await response.json();
+  
+      // Store token just like in SignIn
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('user_id', data.user_id);
+      localStorage.setItem('user_name', data.name);
+  
+      // Redirect to dashboard on success
+      navigate('/dashboard');
+  
+    } catch (err) {
+      setError('Something went wrong. Please try again.');
+    }
     console.log('Signing up:', { name, email });
     navigate('/signup');
   };
+
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-200 via-indigo-900 to-blue-900 flex items-center justify-center p-4">
