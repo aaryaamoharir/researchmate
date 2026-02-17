@@ -8,7 +8,7 @@ export default function SignIn() {
   const [error, setError] = useState('');
   const navigate = useNavigate();
 
-  const handleSignIn = (e) => {
+  const handleSignIn = async (e) => {
     e.preventDefault();
     setError('');
 
@@ -17,12 +17,33 @@ export default function SignIn() {
       setError('Please enter both email and password');
       return;
     }
-
-    //would need to add a check here to see if the sign in is in the database and then i can set isSignedIn() to true 
-    setIsSignedIn(true);
-
-  // redirect to dashboard
-  navigate("/dashboard");
+    try {
+      const response = await fetch('http://localhost:8000/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email, password }),
+      });
+  
+      if (!response.ok) {
+        const errorData = await response.json();
+        setError(errorData.detail || 'Invalid credentials');
+        return;
+      }
+  
+      const data = await response.json();
+  
+      // Store the token and user info for later API calls
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('user_id', data.user_id);
+      localStorage.setItem('user_name', data.name);
+  
+      navigate('/dashboard');
+  
+    } catch (err) {
+      setError('Something went wrong. Please try again.');
+    }
   };
 
   if (!isSignedIn) {
