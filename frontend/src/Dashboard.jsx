@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Upload, MessageCircle } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
+import { uploadPDF } from "../api";
 
 export default function Dashboard() {
   const [uploadedFile, setUploadedFile] = useState(null);
