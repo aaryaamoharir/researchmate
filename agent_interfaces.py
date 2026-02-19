@@ -198,3 +198,88 @@ class IngestionOutcome(TypedDict, total=False):
     doc_id: str | None
     chunk_count: int
     error: QueueAckError
+
+
+# ---------------------------------------------------------------------------
+# vector_search contracts (answer agent)
+# ---------------------------------------------------------------------------
+
+class VectorSearchFilters(TypedDict, total=False):
+    """Optional filters for vector_search."""
+    section_title: str
+
+
+class VectorMatch(TypedDict):
+    """A single match returned by vector_search."""
+    chunk_id: str
+    score: float
+    text: str
+    metadata: dict
+
+
+class VectorSearchResult(TypedDict):
+    """Response from vector_search."""
+    matches: list[VectorMatch]
+
+
+# ---------------------------------------------------------------------------
+# google_search contracts (answer agent)
+# ---------------------------------------------------------------------------
+
+class GoogleSearchHit(TypedDict):
+    """A single hit from google_search."""
+    source_id: str
+    title: str
+    snippet: str
+    url: str
+    score: float
+
+
+class GoogleSearchResult(TypedDict):
+    """Response from google_search."""
+    results: list[GoogleSearchHit]
+
+
+# ---------------------------------------------------------------------------
+# research_paper_search contracts (answer agent)
+# ---------------------------------------------------------------------------
+
+class PaperHit(TypedDict, total=False):
+    """A single paper from research_paper_search."""
+    source_id: str
+    title: str
+    authors: list[str]
+    year: int
+    abstract: str
+    url: str
+    doi: str
+
+
+class PaperSearchResult(TypedDict):
+    """Response from research_paper_search."""
+    papers: list[PaperHit]
+
+
+# ---------------------------------------------------------------------------
+# Answer agent outcome
+# ---------------------------------------------------------------------------
+
+class Citation(TypedDict, total=False):
+    """A single citation used in the answer."""
+    source_id: str
+    source_type: str       # "vector" | "web" | "paper"
+    title: str
+    snippet: str
+    score: float
+    url: str
+    metadata: dict
+
+
+class AnswerOutcome(TypedDict, total=False):
+    """Structured result from the answer agent."""
+    status: str            # "success" | "no_context" | "error"
+    answer: str
+    citations: list[Citation]
+    sources_used: list[str]
+    query: str
+    error: str
