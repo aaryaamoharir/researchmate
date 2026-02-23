@@ -21,9 +21,6 @@ from jose import jwt, JWTError
 from fastapi.middleware.cors import CORSMiddleware
 
 
-
-
-
 app = FastAPI()
 
 # Add this right after app = FastAPI()
