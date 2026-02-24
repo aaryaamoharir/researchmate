@@ -1,20 +1,20 @@
-import os
-from dotenv import load_dotenv
-from groq import Groq
+from __future__ import annotations
+
 import fitz  # PyMuPDF
+from dotenv import load_dotenv
+
+from llm_client import get_chat_model, get_deepseek_client
 
 load_dotenv()
 
 _client = None
+MAX_SUMMARY_CHARS = 50000
 
 
 def get_client():
     global _client
     if _client is None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-        _client = Groq(api_key=api_key)
+        _client = get_deepseek_client()
     return _client
 
 
@@ -29,41 +29,49 @@ def extract_full_text(pdf_path: str) -> str:
     return "\n".join(text_parts)
 
 
+def _truncate_text(text: str, max_chars: int = MAX_SUMMARY_CHARS) -> str:
+    """Char-based truncation fallback. Token-aware truncation can be added later."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n\n[Text truncated...]"
+
+
 def summarize_paper(pdf_path: str) -> dict:
     text = extract_full_text(pdf_path)
 
     if not text.strip():
         return {
             "pdf": pdf_path,
-            "summary": "No text content found in this PDF."
+            "summary": "No text content found in this PDF.",
         }
 
     client = get_client()
-
-    # Truncate if too long (Groq context limit)
-    max_chars = 12000
-    if len(text) > max_chars:
-        text = text[:max_chars] + "\n\n[Text truncated...]"
+    text = _truncate_text(text)
 
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=get_chat_model(),
         messages=[
             {
                 "role": "system",
-                "content": "You are a research assistant. Provide a comprehensive summary of this research paper. Include: 1) Main objective/problem, 2) Key methodology, 3) Main findings/results, 4) Conclusions. Keep it concise but informative (3-5 paragraphs)."
+                "content": (
+                    "You are a research assistant. Provide a comprehensive summary "
+                    "of this research paper. Include: 1) Main objective/problem, "
+                    "2) Key methodology, 3) Main findings/results, 4) Conclusions. "
+                    "Keep it concise but informative (3-5 paragraphs)."
+                ),
             },
             {
                 "role": "user",
-                "content": text
-            }
+                "content": text,
+            },
         ],
         temperature=0.3,
-        max_tokens=800
+        max_tokens=800,
     )
 
     return {
         "pdf": pdf_path,
-        "summary": response.choices[0].message.content
+        "summary": response.choices[0].message.content,
     }
 
 

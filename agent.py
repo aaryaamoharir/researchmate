@@ -1,107 +1,100 @@
+from __future__ import annotations
 
 import os
+from typing import TypedDict
+
 from dotenv import load_dotenv
-from langgraph.graph import StateGraph, END
+from langgraph.graph import END, StateGraph
+
+from embeddings import search_all
+from llm_client import get_chat_model, get_deepseek_client
 
 # Load .env file
 load_dotenv()
-from typing import TypedDict
-from groq import Groq
-from embeddings import search_all
 
-# Initialize Groq client
-groq_client = None
+# Initialize DeepSeek/OpenAI-compatible client lazily via shared helper.
+_deepseek_client = None
 
 
-def get_groq_client():
-    global groq_client
-    if groq_client is None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise ValueError("GROQ_API_KEY environment variable not set")
-        groq_client = Groq(api_key=api_key)
-    return groq_client
+def get_deepseek_client_cached():
+    global _deepseek_client
+    if _deepseek_client is None:
+        _deepseek_client = get_deepseek_client()
+    return _deepseek_client
 
 
 class State(TypedDict):
     query: str
-    text_results: list[dict]
-    figure_results: list[dict]
+    page_results: list[dict]
     context: str
     response: str
 
 
-def retrieve(state: State) -> State: #retreive func for text/figs from paper
+def retrieve(state: State) -> State:
+    """Retrieve relevant pages from the unified vector collection."""
     results = search_all(state["query"], top_k=5)
 
-    state["text_results"] = [
-        {
-            "pdf": r.payload["pdf"],
-            "page": r.payload["page"],
-            "text": r.payload.get("text", ""),
-            "score": r.score
-        }
-        for r in results["text"]
-    ]
+    page_hits = results.get("pages") or results.get("text") or []
+    page_results: list[dict] = []
 
-    state["figure_results"] = [
-        {
-            "pdf": r.payload["pdf"],
-            "page": r.payload["page"],
-            "score": r.score
-        }
-        for r in results["figures"]
-    ]
+    for hit in page_hits:
+        payload = getattr(hit, "payload", {}) or {}
+        score = getattr(hit, "score", 0.0)
+        page_results.append(
+            {
+                "pdf": payload.get("pdf", ""),
+                "page": payload.get("page", 0),
+                "text": payload.get("text", ""),
+                "score": score,
+            }
+        )
 
-    # Build context from retrieved text
+    state["page_results"] = page_results
+
+    # Build context from retrieved page text.
     context_parts = []
-    for r in state["text_results"]:
-        context_parts.append(f"[Page {r['page']}]: {r['text']}")
+    for r in page_results:
+        pdf_label = os.path.basename(r.get("pdf", "")) or "unknown.pdf"
+        page = r.get("page", "?")
+        context_parts.append(f"[{pdf_label} Page {page}]: {r.get('text', '')}")
 
     state["context"] = "\n\n".join(context_parts)
     return state
 
 
-def generate(state: State) -> State: #groq to make response
-    if not state["text_results"] and not state["figure_results"]:
+def generate(state: State) -> State:
+    """Generate an answer with DeepSeek using retrieved page context."""
+    if not state["page_results"]:
         state["response"] = "No relevant content found. Please index some papers first."
         return state
 
-    client = get_groq_client()
+    client = get_deepseek_client_cached()
 
-    # Build prompt
-    system_prompt = """You are a helpful research assistant. Answer questions based on the provided context from research papers.
-Be concise and accurate. If the context doesn't contain enough information to answer, say so.
-Always cite the page numbers when referencing specific information."""
-
-    user_prompt = f"""Context from research papers:
-{state['context']}
-
-Question: {state['query']}
-
-Answer:"""
-
-    # Call Groq
-    response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        temperature=0.3,
-        max_tokens=1024
+    system_prompt = (
+        "You are a helpful research assistant. Answer questions based on the "
+        "provided context from research papers. Be concise and accurate. If the "
+        "context doesn't contain enough information to answer, say so. Always "
+        "cite the page numbers when referencing specific information."
     )
 
-    answer = response.choices[0].message.content
+    user_prompt = (
+        "Context from research papers:\n"
+        f"{state['context']}\n\n"
+        f"Question: {state['query']}\n\n"
+        "Answer:"
+    )
 
-    # Add figure references if any
-    if state["figure_results"]:
-        figure_refs = "\n\nRelated figures found on: " + ", ".join(
-            f"Page {r['page']}" for r in state["figure_results"]
-        )
-        answer += figure_refs
+    response = client.chat.completions.create(
+        model=get_chat_model(),
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+        max_tokens=1024,
+    )
 
-    state["response"] = answer
+    state["response"] = response.choices[0].message.content or ""
     return state
 
 
@@ -124,11 +117,12 @@ agent = build_agent()
 
 
 def chat(query: str) -> str:
-    result = agent.invoke({
-        "query": query,
-        "text_results": [],
-        "figure_results": [],
-        "context": "",
-        "response": ""
-    })
+    result = agent.invoke(
+        {
+            "query": query,
+            "page_results": [],
+            "context": "",
+            "response": "",
+        }
+    )
     return result["response"]

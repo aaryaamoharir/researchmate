@@ -1,16 +1,12 @@
 """CLI for the hybrid research paper RAG system."""
 
+from __future__ import annotations
+
 import argparse
 import glob
 import logging
 
 from agent_interfaces import MCPToolClient
-from chunks import extract_text_chunks
-from images import extract_figures
-from embeddings import create_collections, store_text_chunks, store_figures
-from agent import chat
-from ingestion_agent import IngestionAgent
-from answer_agent import AnswerAgent
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +16,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class StubMCPToolClient:
-    """Placeholder MCP client — raises on every call.
+    """Placeholder MCP client - raises on every call.
 
     Lives here (CLI wiring concern) so agents stay transport-agnostic.
     Swap this for the real client once MCP tools are connected; only
@@ -39,34 +35,32 @@ class StubMCPToolClient:
 # ---------------------------------------------------------------------------
 
 def cmd_index(args: argparse.Namespace) -> None:
-    """Index all PDFs: extract text chunks and figures."""
-    create_collections()
+    """Index all PDFs as page-level ColQwen2 embeddings."""
+    from embeddings import create_collection, index_pdf
+
+    create_collection(recreate=args.recreate, drop_legacy=not args.keep_legacy)
     pdf_files = glob.glob("arxiv_pdfs/*.pdf")
 
     if not pdf_files:
         print("No PDF files found in arxiv_pdfs/")
         return
 
+    total_pages_indexed = 0
     for pdf in pdf_files:
         print(f"\nProcessing: {pdf}")
-
         try:
-            chunks = extract_text_chunks(pdf)
-            store_text_chunks(chunks)
-        except Exception as e:
-            print(f"  Text extraction error: {e}")
+            result = index_pdf(pdf, batch_size=args.batch_size, dpi_scale=args.dpi_scale)
+            total_pages_indexed += int(result.get("pages_indexed", 0))
+        except Exception as exc:
+            print(f"  Indexing error: {exc}")
 
-        try:
-            figures = extract_figures(pdf)
-            store_figures(figures)
-        except Exception as e:
-            print(f"  Figure extraction error: {e}")
-
-    print(f"\nIndexed {len(pdf_files)} PDFs")
+    print(f"\nIndexed {len(pdf_files)} PDFs ({total_pages_indexed} pages)")
 
 
 def cmd_chat(args: argparse.Namespace) -> None:
     """Run the interactive LangGraph chat interface."""
+    from agent import chat
+
     print("Chat with your papers (type 'quit' to exit)")
     print("-" * 40)
 
@@ -84,12 +78,14 @@ def cmd_chat(args: argparse.Namespace) -> None:
         except KeyboardInterrupt:
             print("\nGoodbye!")
             break
-        except Exception as e:
-            print(f"\nError: {e}")
+        except Exception as exc:
+            print(f"\nError: {exc}")
 
 
 def cmd_ingest_once(args: argparse.Namespace) -> None:
     """Run the ingestion agent for a single job."""
+    from ingestion_agent import IngestionAgent
+
     client: MCPToolClient = StubMCPToolClient()
     agent = IngestionAgent(client)
     outcome = agent.run_once()
@@ -99,6 +95,8 @@ def cmd_ingest_once(args: argparse.Namespace) -> None:
 
 def cmd_ingest_worker(args: argparse.Namespace) -> None:
     """Run the ingestion agent as a polling worker."""
+    from ingestion_agent import IngestionAgent
+
     client: MCPToolClient = StubMCPToolClient()
     agent = IngestionAgent(client)
     agent.run_loop(poll_interval_s=args.poll_interval)
@@ -106,6 +104,8 @@ def cmd_ingest_worker(args: argparse.Namespace) -> None:
 
 def cmd_ask(args: argparse.Namespace) -> None:
     """Run a single-shot answer query."""
+    from answer_agent import AnswerAgent
+
     client: MCPToolClient = StubMCPToolClient()
     agent = AnswerAgent(client)
 
@@ -126,6 +126,8 @@ def cmd_ask(args: argparse.Namespace) -> None:
 
 def cmd_ask_loop(args: argparse.Namespace) -> None:
     """Run the interactive answer agent REPL."""
+    from answer_agent import AnswerAgent
+
     client: MCPToolClient = StubMCPToolClient()
     agent = AnswerAgent(client)
     agent.answer_loop()
@@ -144,7 +146,29 @@ def build_parser() -> argparse.ArgumentParser:
     subs = parser.add_subparsers(dest="command")
 
     # index
-    subs.add_parser("index", help="Index PDFs from arxiv_pdfs/")
+    index_p = subs.add_parser("index", help="Index PDFs from arxiv_pdfs/")
+    index_p.add_argument(
+        "--recreate",
+        action="store_true",
+        help="Drop and recreate the unified collection before indexing",
+    )
+    index_p.add_argument(
+        "--keep-legacy",
+        action="store_true",
+        help="Do not delete legacy papers_text / papers_visual collections",
+    )
+    index_p.add_argument(
+        "--batch-size",
+        type=int,
+        default=8,
+        help="Embedding batch size for page images (default: 8)",
+    )
+    index_p.add_argument(
+        "--dpi-scale",
+        type=float,
+        default=2.0,
+        help="Page render scale factor (default: 2.0)",
+    )
 
     # chat
     subs.add_parser("chat", help="Interactive LangGraph chat REPL")
@@ -155,7 +179,9 @@ def build_parser() -> argparse.ArgumentParser:
     # ingest-worker
     iw = subs.add_parser("ingest-worker", help="Run ingestion agent as polling worker")
     iw.add_argument(
-        "--poll-interval", type=int, default=2,
+        "--poll-interval",
+        type=int,
+        default=2,
         help="Seconds between queue polls (default: 2)",
     )
 

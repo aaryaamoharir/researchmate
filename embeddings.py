@@ -1,167 +1,304 @@
+from __future__ import annotations
 
-from qdrant_client import QdrantClient
-from qdrant_client.models import VectorParams, Distance, PointStruct
+import hashlib
+import os
+from datetime import datetime, timezone
+
+import fitz  # PyMuPDF
 import torch
+from PIL import Image
+from qdrant_client import QdrantClient
+from qdrant_client.models import Distance, PointStruct, VectorParams
 
-_text_model = None
-_vision_model = None
-_vision_processor = None
+EMBED_DIM = 128  # ColQwen2 pooled embedding size
+COLLECTION = "papers"
+LEGACY_COLLECTIONS = ("papers_text", "papers_visual")
+
+_model = None
+_processor = None
 _client = None
 
-TEXT_DIM = 384  # all-MiniLM-L6-v2
-VISION_DIM = 128  # ColQwen2
 
-
-def get_text_model():
-    global _text_model
-    if _text_model is None:
-        from sentence_transformers import SentenceTransformer
-        _text_model = SentenceTransformer('all-MiniLM-L6-v2')
-    return _text_model
-
-
-def get_vision_model():
-    global _vision_model, _vision_processor
-    if _vision_model is None:
+def get_model():
+    """Lazily load the ColQwen2 model and processor."""
+    global _model, _processor
+    if _model is None:
         from colpali_engine.models import ColQwen2, ColQwen2Processor
-        _vision_model = ColQwen2.from_pretrained(
+
+        _model = ColQwen2.from_pretrained(
             "vidore/colqwen2-v1.0",
-            torch_dtype=torch.float32
+            torch_dtype=torch.float32,
         )
-        _vision_model.eval()
-        _vision_processor = ColQwen2Processor.from_pretrained("vidore/colqwen2-v1.0")
-    return _vision_model, _vision_processor
+        _model.eval()
+        _processor = ColQwen2Processor.from_pretrained("vidore/colqwen2-v1.0")
+    return _model, _processor
 
 
-def get_client():
+def get_client() -> QdrantClient:
     global _client
     if _client is None:
         _client = QdrantClient(path="./qdrant_db")
     return _client
 
 
-def create_collections():
+def _collection_exists(client: QdrantClient, name: str) -> bool:
+    try:
+        client.get_collection(name)
+        return True
+    except Exception:
+        return False
+
+
+def _safe_delete_collection(client: QdrantClient, name: str) -> None:
+    try:
+        client.delete_collection(name)
+        print(f"Removed legacy collection '{name}'")
+    except Exception:
+        # Missing collection and unsupported delete API variants are both fine.
+        pass
+
+
+def create_collection(recreate: bool = False, drop_legacy: bool = True) -> None:
+    """Ensure the unified page-level collection exists.
+
+    `recreate=False` is non-destructive by default. Use `recreate=True` for a full
+    rebuild. Legacy collections can optionally be removed after cutover.
+    """
     client = get_client()
 
-    # Text collection
-    client.recreate_collection(
-        "papers_text",
-        vectors_config=VectorParams(size=TEXT_DIM, distance=Distance.COSINE)
-    )
-    print("Created 'papers_text' collection")
+    if recreate:
+        client.recreate_collection(
+            COLLECTION,
+            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+        )
+        print(f"Recreated '{COLLECTION}' collection")
+    elif not _collection_exists(client, COLLECTION):
+        client.create_collection(
+            COLLECTION,
+            vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
+        )
+        print(f"Created '{COLLECTION}' collection")
+    else:
+        print(f"Using existing '{COLLECTION}' collection")
 
-    # Visual collection
-    client.recreate_collection(
-        "papers_visual",
-        vectors_config=VectorParams(size=VISION_DIM, distance=Distance.COSINE)
-    )
-    print("Created 'papers_visual' collection")
-
-
-def embed_text(text: str) -> list[float]:
-    model = get_text_model()
-    return model.encode(text).tolist()
-
-
-def embed_image(image) -> list[float]:
-    """Embed image using ColQwen2."""
-    model, processor = get_vision_model()
-    inputs = processor.process_images([image])
-    inputs = {k: v.to(model.device) for k, v in inputs.items()}
-
-    with torch.no_grad():
-        embeddings = model(**inputs)
-        embedding = embeddings[0].mean(dim=0).cpu().numpy()
-
-    return embedding.tolist()
+    if drop_legacy:
+        for legacy_name in LEGACY_COLLECTIONS:
+            if legacy_name != COLLECTION:
+                _safe_delete_collection(client, legacy_name)
 
 
-def store_text_chunks(chunks: list[dict]):
-    client = get_client()
-    model = get_text_model()
-
-    points = []
-    for i, chunk in enumerate(chunks):
-        embedding = model.encode(chunk["text"]).tolist()
-        point_id = abs(hash(f"{chunk['pdf']}_text_{chunk['page']}_{i}")) % (2**63)
-
-        points.append(PointStruct(
-            id=point_id,
-            vector=embedding,
-            payload={
-                "pdf": chunk["pdf"],
-                "page": chunk["page"],
-                "text": chunk["text"],
-                "type": "text"
-            }
-        ))
-
-    if points:
-        client.upsert("papers_text", points)
-    print(f"  Stored {len(points)} text chunks")
+def _mean_pool_tensor(sample: torch.Tensor) -> list[float]:
+    if sample.ndim == 1:
+        pooled = sample
+    else:
+        pooled = sample.mean(dim=0)
+    return pooled.detach().cpu().numpy().tolist()
 
 
-def store_figures(figures: list[dict]):
-    client = get_client()
+def _pool_batch_outputs(outputs) -> list[list[float]]:
+    """Pool ColQwen2 outputs into one vector per input image/query."""
+    vectors: list[list[float]] = []
 
-    points = []
-    for i, fig in enumerate(figures):
-        embedding = embed_image(fig["image"])
-        point_id = abs(hash(f"{fig['pdf']}_fig_{fig['page']}_{i}")) % (2**63)
+    try:
+        num_items = len(outputs)
+    except TypeError as exc:  # pragma: no cover - defensive
+        raise TypeError("Unexpected embedding output type from ColQwen2") from exc
 
-        points.append(PointStruct(
-            id=point_id,
-            vector=embedding,
-            payload={
-                "pdf": fig["pdf"],
-                "page": fig["page"],
-                "type": "figure",
-                "size": fig.get("size", (0, 0))
-            }
-        ))
-
-    if points:
-        client.upsert("papers_visual", points)
-    print(f"  Stored {len(points)} figures")
+    for i in range(num_items):
+        sample = outputs[i]
+        if not isinstance(sample, torch.Tensor):
+            raise TypeError("Unexpected ColQwen2 sample output type")
+        vectors.append(_mean_pool_tensor(sample))
+    return vectors
 
 
-def search_text(query: str, top_k: int = 3) -> list:
-    client = get_client()
-    q_emb = embed_text(query)
+def embed_pages(images, batch_size: int = 8) -> list[list[float]]:
+    """Embed page images using ColQwen2 in sub-batches to reduce memory spikes."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    if not images:
+        return []
 
-    results = client.query_points(
-        collection_name="papers_text",
-        query=q_emb,
-        limit=top_k
-    )
-    return results.points
+    model, processor = get_model()
+    all_vectors: list[list[float]] = []
+
+    for start in range(0, len(images), batch_size):
+        batch = images[start:start + batch_size]
+        inputs = processor.process_images(batch)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+            all_vectors.extend(_pool_batch_outputs(outputs))
+
+    return all_vectors
 
 
-def search_figures(query: str, top_k: int = 3) -> list:
-    client = get_client()
-    model, processor = get_vision_model()
-
-    # Embed query as text for vision model
+def embed_query(query: str) -> list[float]:
+    """Embed a text query using ColQwen2 query encoder path."""
+    model, processor = get_model()
     inputs = processor.process_queries([query])
     inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
     with torch.no_grad():
-        embeddings = model(**inputs)
-        q_emb = embeddings[0].mean(dim=0).cpu().numpy().tolist()
+        outputs = model(**inputs)
+    vectors = _pool_batch_outputs(outputs)
+    return vectors[0]
 
+
+def _pdf_fingerprint(pdf_path: str) -> str:
+    st = os.stat(pdf_path)
+    payload = f"{os.path.abspath(pdf_path)}|{st.st_size}|{st.st_mtime_ns}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _point_id(pdf_path: str, page_num: int, fingerprint: str) -> int:
+    seed = f"{os.path.abspath(pdf_path)}|{page_num}|{fingerprint}"
+    digest = hashlib.sha256(seed.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+
+
+def _render_page_image(page, dpi_scale: float):
+    pix = page.get_pixmap(matrix=fitz.Matrix(dpi_scale, dpi_scale), alpha=False)
+    if pix.n == 1:
+        mode = "L"
+    elif pix.n >= 4:
+        mode = "RGBA"
+    else:
+        mode = "RGB"
+
+    img = Image.frombytes(mode, [pix.width, pix.height], pix.samples)
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+    return img
+
+
+def _flush_batch(
+    *,
+    client: QdrantClient,
+    pdf_path: str,
+    fingerprint: str,
+    batch_images,
+    batch_rows: list[dict],
+    batch_size: int,
+) -> int:
+    if not batch_rows:
+        return 0
+
+    vectors = embed_pages(batch_images, batch_size=batch_size)
+    indexed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    points: list[PointStruct] = []
+
+    if len(batch_rows) != len(vectors):
+        raise ValueError(
+            f"batch_rows/vectors length mismatch: {len(batch_rows)} vs {len(vectors)}"
+        )
+    for row, vector in zip(batch_rows, vectors):
+        points.append(
+            PointStruct(
+                id=_point_id(pdf_path, row["page"], fingerprint),
+                vector=vector,
+                payload={
+                    "pdf": pdf_path,
+                    "page": row["page"],
+                    "text": row["text"],
+                    "type": "page",
+                    "char_count": row["char_count"],
+                    "indexed_at": indexed_at,
+                },
+            )
+        )
+
+    if points:
+        client.upsert(COLLECTION, points)
+
+    return len(points)
+
+
+def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dict:
+    """Render PDF pages to images, embed them, and upsert to the unified collection."""
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    if dpi_scale <= 0:
+        raise ValueError("dpi_scale must be > 0")
+
+    client = get_client()
+    fingerprint = _pdf_fingerprint(pdf_path)
+
+    doc = fitz.open(pdf_path)
+    pages_seen = len(doc)
+    pages_indexed = 0
+
+    batch_images = []
+    batch_rows: list[dict] = []
+
+    try:
+        for page_idx in range(pages_seen):
+            page = doc[page_idx]
+            page_num = page_idx + 1
+            text = page.get_text() or ""
+            image = _render_page_image(page, dpi_scale)
+
+            batch_images.append(image)
+            batch_rows.append(
+                {
+                    "page": page_num,
+                    "text": text,
+                    "char_count": len(text),
+                }
+            )
+
+            if len(batch_rows) >= batch_size:
+                pages_indexed += _flush_batch(
+                    client=client,
+                    pdf_path=pdf_path,
+                    fingerprint=fingerprint,
+                    batch_images=batch_images,
+                    batch_rows=batch_rows,
+                    batch_size=batch_size,
+                )
+                batch_images.clear()
+                batch_rows.clear()
+
+        if batch_rows:
+            pages_indexed += _flush_batch(
+                client=client,
+                pdf_path=pdf_path,
+                fingerprint=fingerprint,
+                batch_images=batch_images,
+                batch_rows=batch_rows,
+                batch_size=batch_size,
+            )
+    finally:
+        doc.close()
+
+    result = {
+        "pdf": pdf_path,
+        "pages_seen": pages_seen,
+        "pages_indexed": pages_indexed,
+        "collection": COLLECTION,
+    }
+    print(f"  Indexed {pages_indexed}/{pages_seen} pages into '{COLLECTION}'")
+    return result
+
+
+def search(query: str, top_k: int = 5) -> list:
+    """Query the unified collection with a text query embedded by ColQwen2."""
+    client = get_client()
+    q_emb = embed_query(query)
     results = client.query_points(
-        collection_name="papers_visual",
+        collection_name=COLLECTION,
         query=q_emb,
-        limit=top_k
+        limit=top_k,
     )
     return results.points
 
 
-def search_all(query: str, top_k: int = 3) -> dict:
-    text_results = search_text(query, top_k)
-    figure_results = search_figures(query, top_k)
-
+def search_all(query: str, top_k: int = 5) -> dict:
+    """Compatibility shim preserving the old API shape during migration."""
+    page_results = search(query, top_k)
     return {
-        "text": text_results,
-        "figures": figure_results
+        "pages": page_results,
+        "text": page_results,
+        "figures": [],
     }
