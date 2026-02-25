@@ -69,6 +69,14 @@ class Summary(Base):
     pdf = relationship("PDF", back_populates="summaries")
     #Create a model used var as well
 
+class PDF_Pages(Base):
+    __tablename__ = "pdf_pages"
+    id = Column(Integer, primary_key = True, index = True)
+    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
+    image_path = Column(String) #where to store the images
+    created_at = Column(DateTime, default=datetime.utcnow)
+    pdf = relationship("PDF", back_populates="pdf_pages")
+
 
 # Base.metadata.create_all(bind=engine)
 
@@ -285,6 +293,13 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
         media_type="application/pdf",
         filename=pdf.file_name 
     )
+
+#PDF Pages endpoints
+@app.get("/pdf/{id}/pages", response_model=PDFResponse)
+#######################################################
+
+
+
 
 #Summary Data Contracts
 class SummaryRequest(BaseModel):
