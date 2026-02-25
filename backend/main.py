@@ -82,7 +82,7 @@ class PDF_Pages(Base):
     pdf = relationship("PDF", back_populates="pdf_pages")
 
 
-# Base.metadata.create_all(bind=engine)
+Base.metadata.create_all(bind=engine)
 
 
 def get_db():
@@ -235,7 +235,7 @@ class PDFResponse(BaseModel):
      
 #Convertion method, turn pdf into png
 def convert_pdf_to_pages(pdf_path: str, pdf_id: int, db: Session):
-    pages = convert_from_path(pdf_path)
+    pages = convert_from_path(pdf_path, poppler_path=r"C:\Program Files (x86)\poppler-25.12.0\Library\bin")
 
     page_folder = f"storage/pdfs/{pdf_id}/pages"
     os.makedirs(page_folder, exist_ok=True)
@@ -249,7 +249,7 @@ def convert_pdf_to_pages(pdf_path: str, pdf_id: int, db: Session):
         # save page in DB
         db_page = PDF_Pages(
             pdf_id=pdf_id,
-            page_number=i,
+            id=i,
             image_path=f"pdfs/{pdf_id}/pages/{i}.png"
         )
 
@@ -301,6 +301,50 @@ def get_my_pdfs(current_user = Depends(verify_token), db: Session = Depends(get_
 #    pdfs = db.query(PDF).offset(skip).limit(limit).all()
 #    return pdfs
 
+#PDF Page data contracts
+class PDFPageResponse(BaseModel):
+    id: int
+    pdf_id: int
+    image_path: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+#PDF Pages endpoints
+
+#Gets all pages paths
+@app.get("/pdf/{id}/pages", response_model=List[PDFPageResponse])
+def get_pdf_pages(id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+        pdf = db.query(PDF).filter(PDF.id == id).first()
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF not Found")
+        
+        if str(pdf.user_id) != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+        
+        pages = (db.query(PDF_Pages).filter(PDF_Pages.pdf_id == id).order_by(PDF_Pages.id).all())
+        return pages
+
+#Get Page PNG image
+@app.get("/pdf/{id}/pages/{page_number}", response_model=PDFPageResponse)
+def get_pdf(id : int, page_number : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+    pdf = db.query(PDF).filter(PDF.id == id).first()
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="PDF not Found")
+    
+    if str(pdf.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+    
+    image_path = f"storage/pdfs/{id}/pages/{page_number}.png"
+    
+    if not os.path.exists(image_path):
+        raise HTTPException(status_code=404, detail="Page not Found")
+    
+    return FileResponse(
+        path=image_path,
+        media_type="image/png"
+    )
+
 #Return certain PDF data with the user id
 @app.get("/pdf/{id}", response_model=PDFResponse)
 def read_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
@@ -329,23 +373,6 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
         media_type="application/pdf",
         filename=pdf.file_name 
     )
-
-#PDF Pages endpoints
-@app.get("/pdf/{id}/pages", response_model=PDFResponse)
-def get_pdf_pages(pdf_id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
-        pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
-        if pdf is None:
-            raise HTTPException(status_code=404, detail="PDF not Found")
-        
-        if str(pdf.user_id) != current_user["sub"]:
-            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
-        
-        pages = (db.query(PDF_Pages).filter(PDF_Pages.pdf_id == pdf_id).order_by(PDF_Pages.id).all())
-        return pages
-
-
-
-
 
 #Summary Data Contracts
 class SummaryRequest(BaseModel):
