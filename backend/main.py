@@ -17,6 +17,9 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
+from pdf2image import convert_from_path
+from PIL import Image
+
 
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -59,6 +62,7 @@ class PDF(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     summaries = relationship("Summary", back_populates="pdf")
+    pdf_pages = relationship("PDF_Pages", back_populates="pdf")
 
 class Summary(Base):
     __tablename__ = "summaries"
@@ -229,11 +233,40 @@ class PDFResponse(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
      
+#Convertion method, turn pdf into png
+def convert_pdf_to_pages(pdf_path: str, pdf_id: int, db: Session):
+    pages = convert_from_path(pdf_path)
+
+    page_folder = f"storage/pdfs/{pdf_id}/pages"
+    os.makedirs(page_folder, exist_ok=True)
+
+    for i, page in enumerate(pages, start=1):
+        image_file_path = f"{page_folder}/{i}.png"
+
+        # save image
+        page.save(image_file_path, "PNG")
+
+        # save page in DB
+        db_page = PDF_Pages(
+            pdf_id=pdf_id,
+            page_number=i,
+            image_path=f"pdfs/{pdf_id}/pages/{i}.png"
+        )
+
+        db.add(db_page)
+
+    db.commit()
+
 #Upload new PDF into Database
 @app.post("/pdf/upload", response_model=PDFResponse)
 def create_pdf(file : UploadFile = File(...), db: Session = Depends(get_db), current_user = Depends(verify_token)):
     file_id = str(uuid.uuid4())
-    path = f"storage/{file_id}.pdf"
+    
+
+    folder = f"storage/pdfs/{file_id}"
+    os.makedirs(folder, exist_ok=True)
+    
+    path = f"{folder}/original.pdf"
 
     with open(path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
@@ -247,6 +280,9 @@ def create_pdf(file : UploadFile = File(...), db: Session = Depends(get_db), cur
     db.add(pdf)
     db.commit()
     db.refresh(pdf)
+    #conversion method called when uploaded
+    convert_pdf_to_pages(path, pdf.id, db)
+
     return pdf
 
 #Get all user pdfs
@@ -296,7 +332,17 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
 
 #PDF Pages endpoints
 @app.get("/pdf/{id}/pages", response_model=PDFResponse)
-#######################################################
+def get_pdf_pages(pdf_id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+        pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF not Found")
+        
+        if str(pdf.user_id) != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+        
+        pages = (db.query(PDF_Pages).filter(PDF_Pages.pdf_id == pdf_id).order_by(PDF_Pages.id).all())
+        return pages
+
 
 
 
