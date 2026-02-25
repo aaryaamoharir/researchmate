@@ -25,22 +25,22 @@ export default function SignIn() {
         },
         body: JSON.stringify({ email, password }),
       });
-  
+
       if (!response.ok) {
         const errorData = await response.json();
         setError(errorData.detail || 'Invalid credentials');
         return;
       }
-  
+
       const data = await response.json();
-  
+
       // Store the token and user info for later API calls
       localStorage.setItem('access_token', data.access_token);
       localStorage.setItem('user_id', data.user_id);
       localStorage.setItem('user_name', data.name);
-  
+
       navigate('/dashboard');
-  
+
     } catch (err) {
       setError('Something went wrong. Please try again.');
     }
@@ -89,16 +89,16 @@ export default function SignIn() {
               </div>
             )}
 
-<button
-  type="submit"
-  className="w-full bg-indigo-600 text-white py-3 font-serif rounded-lg font-semibold hover:bg-indigo-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
->
-  Sign In
-</button>
+            <button
+              type="submit"
+              className="w-full bg-indigo-600 text-white py-3 font-serif rounded-lg font-semibold hover:bg-indigo-700 transition transform hover:scale-[1.02] active:scale-[0.98]"
+            >
+              Sign In
+            </button>
 
           </form>
 
-          
+
 
           <div className="mt-8 pt-6 border-t border-gray-200 text-center">
             <p className="text-sm text-gray-600">
