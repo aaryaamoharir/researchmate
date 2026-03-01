@@ -29,7 +29,9 @@ class PDFVectorPoint:
     colqwen_multivector: list[list[float]]
     payload: dict[str, Any]
 
-
+"""
+Create Supabase and Qdrant client
+"""
 class ResearchVectorDB:
     def __init__(
         self,
@@ -53,6 +55,9 @@ class ResearchVectorDB:
         self.colqwen_dim = colqwen_dim or self._resolve_colqwen_dim()
         self.pdf_bucket = os.getenv("SUPABASE_PDF_BUCKET", "pdfs")
 
+    """
+    Get specified embedding dimension, otherwise return None
+    """
     @staticmethod
     def _resolve_colqwen_dim() -> Optional[int]:
         env_dim = os.getenv("COLQWEN_EMBEDDING_DIM") or os.getenv("EMBEDDING_DIM")
@@ -60,6 +65,10 @@ class ResearchVectorDB:
             return None
         return int(env_dim)
 
+    """
+    Ensure that a Qdrant collection exists
+    If it does not already exist, create it
+    """
     def _ensure_collection(self, inferred_dim: Optional[int] = None) -> None:
         if self.qdrant.collection_exists(self.collection_name):
             return
@@ -91,6 +100,9 @@ class ResearchVectorDB:
             field_schema=models.TextIndexParams(type="text"),
         )
 
+    """
+    Get pdf data from Supabase using pdf_id --> use this to pull content of pdf
+    """
     def get_pdf_row(self, pdf_id: int) -> dict[str, Any]:
         result = (
             self.supabase.table("pdfs")
@@ -103,6 +115,9 @@ class ResearchVectorDB:
             raise ValueError(f"pdfs.id={pdf_id} was not found in Supabase.")
         return result.data
 
+    """
+    Download pdf content from Supabase
+    """
     def download_pdf_bytes(self, storage_path: str) -> bytes:
         pdf_bytes = self.supabase.storage.from_(self.pdf_bucket).download(storage_path)
         if not pdf_bytes:
@@ -111,6 +126,9 @@ class ResearchVectorDB:
             )
         return pdf_bytes
 
+    """
+    Read pdf and chunk into pages --> returns list of strings, where each element is text on a page
+    """
     @staticmethod
     def extract_pages(pdf_bytes: bytes) -> list[str]:
         reader = PdfReader(io.BytesIO(pdf_bytes))
@@ -122,15 +140,24 @@ class ResearchVectorDB:
             pages.append(text)
         return pages
 
+    """
+    creates universally unique id for each point (page of a pdf) --> allows us to overwrite text if the same point is supplied later rather than make a new point
+    """
     @staticmethod
     def _make_point_id(pdf_id: int, page_number: int) -> str:
         return str(uuid.uuid5(uuid.NAMESPACE_URL, f"pdf:{pdf_id}:page:{page_number}"))
 
+    """
+    If AI summary doesn't work, compact the text on the page and take the first 700 characters as the summary
+    """
     @staticmethod
     def _default_page_summary(page_text: str, max_chars: int = 700) -> str:
         compact = " ".join(page_text.split())
         return compact[:max_chars]
 
+    """
+    Check that the vector is valid (not empty, the same length as other vectors, and the vector that is expected)
+    """
     @staticmethod
     def _validate_multivector(multivector: list[list[float]], expected_dim: Optional[int]) -> int:
         if not multivector:
@@ -147,6 +174,9 @@ class ResearchVectorDB:
             )
         return first_dim
 
+    """
+    Combine PDF row info, text from that page, and multivectors into a point
+    """
     def build_colqwen_points(
         self,
         *,
@@ -188,6 +218,10 @@ class ResearchVectorDB:
             )
         return points
 
+
+    """
+    Convert from PDFVectorPoint into PointStruct
+    """
     def upsert_colqwen_points(self, points: list[PDFVectorPoint]) -> None:
         qdrant_points = [
             PointStruct(
@@ -199,6 +233,11 @@ class ResearchVectorDB:
         ]
         self.qdrant.upsert(collection_name=self.collection_name, points=qdrant_points)
 
+    """
+    Ingestion method
+    Verify row, ColQwen vectors, existence of collection
+    Downloads pdf and gets pages, then creates points
+    """
     def ingest_pdf_colqwen_by_id(
         self,
         pdf_id: int,
@@ -237,6 +276,9 @@ class ResearchVectorDB:
             "vector_name": COLQWEN_VECTOR_NAME,
         }
 
+    """
+    Creates a filter for pdf_id, user_id, and/or summary_keywords
+    """
     @staticmethod
     def _build_filter(
         *,
@@ -263,6 +305,10 @@ class ResearchVectorDB:
             return None
         return Filter(must=conditions)
 
+    """
+    Main retrieval method
+    Takes in a query vector and possible extra filters (optional) and returns best results with score and text
+    """
     def search_colqwen_pages(
         self,
         *,
@@ -303,6 +349,9 @@ class ResearchVectorDB:
             )
         return output
 
+    """
+    Create a summary row with pdf summary
+    """
     def save_summary(self, *, pdf_id: int, summary: str) -> dict[str, Any]:
         result = (
             self.supabase.table("summaries")
@@ -318,8 +367,3 @@ class ResearchVectorDB:
             raise RuntimeError("Could not insert summary row.")
         return result.data[0]
 
-
-if __name__ == "__main__":
-    # This module now expects ColQwen embeddings to be computed by your model code,
-    # then passed into ingest_pdf_colqwen_by_id(...).
-    print("ResearchVectorDB ready for ColQwen multivector ingestion.")
