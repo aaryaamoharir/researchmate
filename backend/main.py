@@ -74,10 +74,12 @@ class Summary(Base):
 
 class PDF_Pages(Base):
     __tablename__ = "pdf_pages"
-    id = Column(Integer, primary_key = True, index = True)
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     pdf_id = Column(Integer, ForeignKey("pdfs.id"))
     image_path = Column(String) #where to store the images
+    page_number = Column(Integer)
     supabase_path = Column(String, nullable=True)
+    summary = Column(String) #Store given sumamry of page
     created_at = Column(DateTime, default=datetime.utcnow)
     pdf = relationship("PDF", back_populates="pdf_pages")
 
@@ -248,7 +250,7 @@ def convert_pdf_to_pages(pdf_path: str, pdf_id: int, user_id: int, db: Session):
 
         supabase_page_path = f"{user_id}/{pdf_id}/pages/{i}.png"
         with open(image_file_path, "rb") as img_file:
-            supabase.storage.from_("pdfs").upload(
+            supabase.storage.from_("pdf-pages").upload(
                 path=supabase_page_path,
                 file=img_file.read(),
                 file_options={"content-type": "image/png"}
@@ -257,9 +259,10 @@ def convert_pdf_to_pages(pdf_path: str, pdf_id: int, user_id: int, db: Session):
         # save page in DB
         db_page = PDF_Pages(
             pdf_id=pdf_id,
-            id=i,
+            page_number=i,
             image_path=f"pdfs/{pdf_id}/pages/{i}.png",
-            supabase_path=supabase_page_path
+            supabase_path=supabase_page_path,
+            summary = "empty"
         )
 
         db.add(db_page)
@@ -345,7 +348,7 @@ def get_pdf_pages(id : int, db : Session = Depends(get_db), current_user = Depen
 
 #Get Page PNG image
 @app.get("/pdf/{id}/pages/{page_number}", response_model=PDFPageResponse)
-def get_pdf(id : int, page_number : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+def get_pdf_page(id : int, page_number : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
     pdf = db.query(PDF).filter(PDF.id == id).first()
     if pdf is None:
         raise HTTPException(status_code=404, detail="PDF not Found")
@@ -359,11 +362,11 @@ def get_pdf(id : int, page_number : int, db : Session = Depends(get_db), current
     else:
         page = db.query(PDF_Pages).filter(
             PDF_Pages.pdf_id == id,
-            PDF_Pages.id == page_number
+            PDF_Pages.page_number == page_number
         ).first()
         if page is None or page.supabase_path is None:
             raise HTTPException(status_code=404, detail="Page not Found")
-        signed = supabase.storage.from_("pdfs").create_signed_url(
+        signed = supabase.storage.from_("pdf-pages").create_signed_url(
             page.supabase_path, expires_in=3600
         )
         return RedirectResponse(url=signed["signedURL"])
