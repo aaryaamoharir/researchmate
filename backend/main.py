@@ -17,8 +17,14 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import FileResponse
 from jose import jwt, JWTError
+from pdf2image import convert_from_path
+from PIL import Image
+
 
 from fastapi.middleware.cors import CORSMiddleware
+
+
+
 
 
 app = FastAPI()
@@ -41,6 +47,9 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
+supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+
 # Initialize SQLAlchemy for Database Operations
 DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
@@ -54,8 +63,10 @@ class PDF(Base):
     file_name = Column(String)
     storage_path = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
+    supabase_path = Column(String, nullable=True)  
 
     summaries = relationship("Summary", back_populates="pdf")
+    pdf_pages = relationship("PDF_Pages", back_populates="pdf")
 
 class Summary(Base):
     __tablename__ = "summaries"
@@ -66,8 +77,19 @@ class Summary(Base):
     pdf = relationship("PDF", back_populates="summaries")
     #Create a model used var as well
 
+class PDF_Pages(Base):
+    __tablename__ = "pdf_pages"
+    id = Column(Integer, primary_key = True, index = True)
+    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
+    image_path = Column(String) #where to store the images
+    created_at = Column(DateTime, default=datetime.utcnow)
+    supabase_path = Column(String, nullable=True)  
+    page_number = Column(Integer) 
+    summary = Column(String)
+    pdf = relationship("PDF", back_populates="pdf_pages")
 
-# Base.metadata.create_all(bind=engine)
+
+Base.metadata.create_all(bind=engine)
 
 
 def get_db():
@@ -218,33 +240,82 @@ class PDFResponse(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
      
+#Convertion method, turn pdf into png
+from io import BytesIO
+
+def convert_pdf_to_pages(pdf_path: str, pdf_id: int, user_id: str, file_id: str, db: Session):
+    pages = convert_from_path(pdf_path)  # no poppler_path needed on Mac
+
+    page_folder = f"storage/pdfs/{file_id}/pages"
+    os.makedirs(page_folder, exist_ok=True)
+
+    for i, page in enumerate(pages, start=1):
+        image_file_path = f"{page_folder}/{i}.png"
+        page.save(image_file_path, "PNG")
+
+        supabase_page_path = f"{user_id}/{file_id}/pages/{i}.png"
+        with open(image_file_path, "rb") as img_file:
+            supabase_admin.storage.from_("pdf-pages").upload(  # admin client
+                path=supabase_page_path,
+                file=img_file.read(),
+                file_options={"content-type": "image/png", "upsert": "true"}
+            )
+
+        db_page = PDF_Pages(
+            pdf_id=pdf_id,
+            page_number=i,
+            image_path=f"pdfs/{file_id}/pages/{i}.png",
+            supabase_path=supabase_page_path,
+            summary="empty"
+        )
+        db.add(db_page)
+
+    db.commit()
+
 #Upload new PDF into Database
 @app.post("/pdf/upload", response_model=PDFResponse)
-def create_pdf(file : UploadFile = File(...), db: Session = Depends(get_db), current_user = Depends(verify_token)):
+def create_pdf(file: UploadFile = File(...), db: Session = Depends(get_db), current_user = Depends(verify_token)):
     file_id = str(uuid.uuid4())
-    path = f"storage/{file_id}.pdf"
+    folder = f"storage/pdfs/{file_id}"
+    os.makedirs(folder, exist_ok=True)
+    path = f"{folder}/original.pdf"
 
+    file_bytes = file.file.read()
     with open(path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
-    
-    #using user id from supabase auth
-    pdf = PDF(file_name = file.filename, 
-              storage_path = path, 
-              user_id=current_user["sub"]
-              )
+        buffer.write(file_bytes)
 
+    supabase_path = f"{current_user['sub']}/{file_id}/original.pdf"
+    supabase_admin.storage.from_("pdfs").upload(
+        path=supabase_path,
+        file=file_bytes,
+        file_options={"content-type": "application/pdf", "upsert": "true"}
+    )
+
+    pdf = PDF(
+        file_name=file.filename,
+        storage_path=path,
+        supabase_path=supabase_path,
+        user_id=current_user["sub"]
+    )
     db.add(pdf)
     db.commit()
     db.refresh(pdf)
+
+    # Wrap conversion so we can see the real error
+    try:
+        convert_pdf_to_pages(path, pdf.id, current_user["sub"], file_id, db)
+    except Exception as e:
+        print(f"❌ convert_pdf_to_pages failed: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"Page conversion failed: {str(e)}")
+
     return pdf
 
 #Get all user pdfs
 @app.get("/pdf/my_pdfs", response_model=List[PDFResponse])
-def get_my_pdfs(current_user = Depends(verify_token), db: Session = Depends(get_db), skip: int = 0, limit: int = 10):
-
+def get_my_pdfs(current_user=Depends(verify_token), db: Session = Depends(get_db)):
     pdfs = db.query(PDF).filter(
-        PDF.user_id == current_user["sub"]
-    ).offset(skip).limit(limit).all()
+        PDF.user_id == uuid.UUID(current_user["sub"])
+    ).order_by(PDF.created_at.desc()).all()
     return pdfs
 
 
@@ -253,6 +324,62 @@ def get_my_pdfs(current_user = Depends(verify_token), db: Session = Depends(get_
 #def read_pdfs(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
 #    pdfs = db.query(PDF).offset(skip).limit(limit).all()
 #    return pdfs
+
+#PDF Page data contracts
+class PDFPageResponse(BaseModel):
+    id: int
+    pdf_id: int
+    image_path: str
+    page_number: int 
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+#PDF Pages endpoints
+
+#Gets all pages paths
+@app.get("/pdf/{id}/pages", response_model=List[PDFPageResponse])
+def get_pdf_pages(id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+        pdf = db.query(PDF).filter(PDF.id == id).first()
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF not Found")
+        
+        if str(pdf.user_id) != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+        
+        pages = (db.query(PDF_Pages).filter(PDF_Pages.pdf_id == id).order_by(PDF_Pages.page_number).all())
+        return pages
+
+#Get Page PNG image
+@app.get("/pdf/{id}/pages/{page_number}")
+def get_pdf_page(id: int, page_number: int, db: Session = Depends(get_db), current_user = Depends(verify_token)):
+    pdf = db.query(PDF).filter(PDF.id == id).first()
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    if str(pdf.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    page = db.query(PDF_Pages).filter(
+        PDF_Pages.pdf_id == id,
+        PDF_Pages.page_number == page_number
+    ).first()
+    
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+
+    # Try local file first using image_path from DB (not hardcoded)
+    local_path = f"storage/{page.image_path}"
+    if os.path.exists(local_path):
+        return FileResponse(path=local_path, media_type="image/png")
+
+    # Fall back to Supabase signed URL
+    if page.supabase_path is None:
+        raise HTTPException(status_code=404, detail="No file path available")
+    
+    signed = supabase_admin.storage.from_("pdf-pages").create_signed_url(
+        page.supabase_path, expires_in=3600
+    )
+    return RedirectResponse(url=signed["signedURL"])
 
 #Return certain PDF data with the user id
 @app.get("/pdf/{id}", response_model=PDFResponse)
