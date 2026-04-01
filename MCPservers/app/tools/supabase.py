@@ -63,7 +63,11 @@ def supabase_sql(sql: str) -> list[dict]:
     text = response.json()["result"]["content"][0]["text"]
     text = json.loads(text)  # parse it again — it's a double-encoded string
 
+    if isinstance(text, dict):
+        text = text.get("result", "")
+
     # Now extract between the tags
     start = text.index("[")
     end = text.rindex("]") + 1
     return json.loads(text[start:end])
+

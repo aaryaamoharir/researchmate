@@ -3,6 +3,7 @@ from mcp.server.fastmcp import FastMCP
 from MCPservers.app.tools.supabase import supabase_sql
 
 mcp = FastMCP("research-papers")
+SUPABASE_PROJECT_URL = "https://hbutreqslisuwsjifmas.supabase.co"
 
 @mcp.tool()
 def get_paper(pdf_id: int) -> dict:
@@ -41,5 +42,35 @@ def create_summary(pdf_id: int, summary: str) -> dict:
         """
     )
 
+@mcp.tool()
+def get_pdf_page_urls(pdf_id: int) -> list[dict]:
+    """Get all page image URLs for a PDF from Supabase storage."""
+    rows = supabase_sql(
+        f"SELECT id, pdf_id, image_path, supabase_path, created_at FROM pdf_pages WHERE pdf_id = {pdf_id} ORDER BY id"
+    )
+    for row in rows:
+        path = row.get("supabase_path") or row.get("image_path")
+        row["url"] = f"{SUPABASE_PROJECT_URL}/storage/v1/object/public/pdf-pages/{path}"
+    return rows
+
+@mcp.tool()
+def get_pdf_page_url(pdf_id: int, page_number: int) -> str:
+    """Get a single page image URL by pdf_id and page number."""
+    rows = supabase_sql(
+        f"""
+        SELECT image_path, supabase_path
+        FROM pdf_pages 
+        WHERE pdf_id = {pdf_id} 
+        ORDER BY id
+        LIMIT 1 OFFSET {page_number - 1}
+        """
+    )
+    if not rows:
+        return ""
+    row = rows[0]
+    path = row.get("supabase_path") or row.get("image_path")
+    return f"{SUPABASE_PROJECT_URL}/storage/v1/object/public/pdf-pages/{path}"
+
 if __name__ == "__main__":
     mcp.run()
+
