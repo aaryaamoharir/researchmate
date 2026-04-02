@@ -55,7 +55,51 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
-
+ 
+class StickyNote(Base):
+    __tablename__ = "sticky_notes"
+    id         = Column(Integer, primary_key=True, index=True)
+    user_id    = Column(UUID(as_uuid=True), index=True)
+    pdf_id     = Column(Integer, ForeignKey("pdfs.id", ondelete="CASCADE"))
+    page_number = Column(Integer)
+    text       = Column(Text, default="")
+    x          = Column(Integer)          # px offset from page left
+    y          = Column(Integer)          # px offset from page top
+    color_idx  = Column(Integer, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+ 
+    pdf = relationship("PDF")
+ 
+ 
+# 2. ADD THESE PYDANTIC SCHEMAS (alongside your other response models)
+# ─────────────────────────────────────────────────────────────────────────────
+ 
+class StickyNoteCreate(BaseModel):
+    pdf_id:      int
+    page_number: int
+    text:        str = ""
+    x:           float
+    y:           float
+    color_idx:   int = 0
+ 
+class StickyNoteUpdate(BaseModel):
+    text:      str | None = None
+    x:         int | None = None
+    y:         int | None = None
+    color_idx: int | None = None
+ 
+class StickyNoteResponse(BaseModel):
+    id:          int
+    pdf_id:      int
+    page_number: int
+    text:        str
+    x:           int
+    y:           int
+    color_idx:   int
+    created_at:  datetime
+ 
+    model_config = ConfigDict(from_attributes=True)
+ 
 class PDF(Base):
     __tablename__ = "pdfs"
     id = Column(Integer, primary_key = True, index = True)
@@ -295,7 +339,7 @@ def create_pdf(file: UploadFile = File(...), db: Session = Depends(get_db), curr
         file_name=file.filename,
         storage_path=path,
         supabase_path=supabase_path,
-        user_id=current_user["sub"]
+        user_id=uuid.UUID(current_user["sub"])
     )
     db.add(pdf)
     db.commit()
@@ -480,3 +524,97 @@ def get_summary(pdf_id : int, db : Session = Depends(get_db), current_user = Dep
         raise HTTPException(status_code=404, detail="Summary not Found")
     
     return summary
+
+ 
+@app.post("/notes/", response_model=StickyNoteResponse)
+def create_note(
+    payload: StickyNoteCreate,
+    db: Session = Depends(get_db),
+    current_user=Depends(verify_token),
+):
+    """Create a sticky note for the authenticated user."""
+    # Verify the PDF belongs to this user
+    pdf = db.query(PDF).filter(PDF.id == payload.pdf_id).first()
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    if str(pdf.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+ 
+    note = StickyNote(
+        user_id=uuid.UUID(current_user["sub"]),
+        pdf_id=payload.pdf_id,
+        page_number=payload.page_number,
+        text=payload.text,
+        x=payload.x,
+        y=payload.y,
+        color_idx=payload.color_idx,
+    )
+    db.add(note)
+    db.commit()
+    db.refresh(note)
+    return note
+ 
+ 
+@app.get("/notes/{pdf_id}", response_model=List[StickyNoteResponse])
+def get_notes_for_pdf(
+    pdf_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(verify_token),
+):
+    """Return all sticky notes the current user placed on a specific PDF."""
+    pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="PDF not found")
+    if str(pdf.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+ 
+    return (
+        db.query(StickyNote)
+        .filter(
+            StickyNote.pdf_id == pdf_id,
+            StickyNote.user_id == uuid.UUID(current_user["sub"]),
+        )
+        .order_by(StickyNote.page_number, StickyNote.id)
+        .all()
+    )
+ 
+ 
+@app.patch("/notes/{note_id}", response_model=StickyNoteResponse)
+def update_note(
+    note_id: int,
+    payload: StickyNoteUpdate,
+    db: Session = Depends(get_db),
+    current_user=Depends(verify_token),
+):
+    """Update text, position, or colour of a note."""
+    note = db.query(StickyNote).filter(StickyNote.id == note_id).first()
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if str(note.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+ 
+    if payload.text      is not None: note.text      = payload.text
+    if payload.x         is not None: note.x         = payload.x
+    if payload.y         is not None: note.y         = payload.y
+    if payload.color_idx is not None: note.color_idx = payload.color_idx
+ 
+    db.commit()
+    db.refresh(note)
+    return note
+ 
+ 
+@app.delete("/notes/{note_id}", status_code=204)
+def delete_note(
+    note_id: int,
+    db: Session = Depends(get_db),
+    current_user=Depends(verify_token),
+):
+    """Delete a sticky note."""
+    note = db.query(StickyNote).filter(StickyNote.id == note_id).first()
+    if note is None:
+        raise HTTPException(status_code=404, detail="Note not found")
+    if str(note.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized")
+ 
+    db.delete(note)
+    db.commit()
