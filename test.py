@@ -2,6 +2,9 @@ from MCPservers.app.tools.supabase import supabase_sql
 from MCPservers.app.main import get_paper, create_paper, create_summary, get_summary, get_pdf_page_urls, get_pdf_page_url
 from MCPservers.app.tools.googlescholar import search_research
 import json
+import json
+from MCPservers.app.tools.arxiv_tools import search_arxiv
+
 
 # result = create_summary(
 #     pdf_id=19,
@@ -22,11 +25,15 @@ import json
 
 
 #test for google scholar
-results = search_research(
-        "transformer attention mechanisms",
-        total_results=10,
-        date_restrict="y1",   # last year
-        prefer_pdfs=True
-    )
-print(f"Fetched {len(results)} results")
-print(json.dumps(results, indent=2, ensure_ascii=False))
+# results = search_research(
+#         "transformer attention mechanisms",
+#         total_results=10,
+#         date_restrict="y1",   # last year
+#         prefer_pdfs=True
+#     )
+# print(f"Fetched {len(results)} results")
+# print(json.dumps(results, indent=2, ensure_ascii=False))
+
+# arxiv test
+res = search_arxiv("computer vision", max_results=5)
+print(json.dumps(res, indent=2))

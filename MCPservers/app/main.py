@@ -2,6 +2,7 @@ from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 from MCPservers.app.tools.supabase import supabase_sql
 from MCPservers.app.tools.googlescholar import search_research
+from MCPservers.app.tools.arxiv_tools  import search_arxiv, download_arxiv_pdf
 
 mcp = FastMCP("research-papers")
 SUPABASE_PROJECT_URL = "https://hbutreqslisuwsjifmas.supabase.co"
@@ -80,6 +81,18 @@ def search_scholar(query: str, total_results: int = 10, date_restrict: str = "y1
     """
     return search_research(query, total_results=total_results, date_restrict=date_restrict, prefer_pdfs=True)
 
+@mcp.tool()
+def arxiv_search(query: str, max_results: int = 5, start: int = 0, sort_by: str = "relevance") -> list[dict]:
+    """Search arXiv and return structured results."""
+    return search_arxiv(query=query, max_results=max_results, start=start, sort_by=sort_by)
+
+@mcp.tool()
+def arxiv_download_pdf(pdf_url: str, output_dir: str = "arxiv_pdfs") -> str:
+    """Download an arXiv PDF locally and return the saved file path."""
+    return download_arxiv_pdf(pdf_url=pdf_url, output_dir=output_dir)
+
+
 if __name__ == "__main__":
     mcp.run()
+
 
