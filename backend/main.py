@@ -15,12 +15,14 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from jose import jwt, JWTError
+from pdf2image import convert_from_path
+from PIL import Image
+from vector_database import QdrantHandler
+
 
 from fastapi.middleware.cors import CORSMiddleware
-
-
 
 
 
@@ -56,9 +58,11 @@ class PDF(Base):
     user_id = Column(UUID(as_uuid=True), index=True)
     file_name = Column(String)
     storage_path = Column(String)
+    supabase_path = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     summaries = relationship("Summary", back_populates="pdf")
+    pdf_pages = relationship("PDF_Pages", back_populates="pdf")
 
 class Summary(Base):
     __tablename__ = "summaries"
@@ -69,8 +73,19 @@ class Summary(Base):
     pdf = relationship("PDF", back_populates="summaries")
     #Create a model used var as well
 
+class PDF_Pages(Base):
+    __tablename__ = "pdf_pages"
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
+    image_path = Column(String) #where to store the images
+    page_number = Column(Integer)
+    supabase_path = Column(String, nullable=True)
+    summary = Column(String) #Store given sumamry of page
+    created_at = Column(DateTime, default=datetime.utcnow)
+    pdf = relationship("PDF", back_populates="pdf_pages")
 
-# Base.metadata.create_all(bind=engine)
+
+Base.metadata.create_all(bind=engine)
 
 
 def get_db():
@@ -221,24 +236,77 @@ class PDFResponse(BaseModel):
     
     model_config = ConfigDict(from_attributes=True)
      
+#Convertion method, turn pdf into png
+def convert_pdf_to_pages(pdf_path: str, pdf_id: int, user_id: int, db: Session):
+    pages = convert_from_path(pdf_path, poppler_path=r"C:\Program Files (x86)\poppler-25.12.0\Library\bin")
+    qdrant_client = QdrantHandler()
+    page_folder = f"storage/pdfs/{pdf_id}/pages"
+    os.makedirs(page_folder, exist_ok=True)
+ 
+    for i, page in enumerate(pages, start=1):
+        image_file_path = f"{page_folder}/{i}.png"
+ 
+        # save image
+        page.save(image_file_path, "PNG")
+ 
+        supabase_page_path = f"{user_id}/{pdf_id}/pages/{i}.png"
+        with open(image_file_path, "rb") as img_file:
+            supabase.storage.from_("pdf-pages").upload(
+                path=supabase_page_path,
+                file=img_file.read(),
+                file_options={"content-type": "image/png"}
+            )
+ 
+        # save page in DB
+        db_page = PDF_Pages(
+            pdf_id=pdf_id,
+            page_number=i,
+            image_path=f"pdfs/{pdf_id}/pages/{i}.png",
+            supabase_path=supabase_page_path,
+            summary = "empty"
+        )
+ 
+        db.add(db_page)
+        vector = # call Hrishi's method to get vector embedding of picture 
+        qdrant_client.createPoint(user_id, vector, pdf_id, page, supabase)
+ 
+    db.commit()
+
 #Upload new PDF into Database
 @app.post("/pdf/upload", response_model=PDFResponse)
 def create_pdf(file : UploadFile = File(...), db: Session = Depends(get_db), current_user = Depends(verify_token)):
     file_id = str(uuid.uuid4())
-    path = f"storage/{file_id}.pdf"
+    
 
+    folder = f"storage/pdfs/{file_id}"
+    os.makedirs(folder, exist_ok=True)
+    
+    path = f"{folder}/original.pdf"
+
+    file_bytes = file.file.read()
     with open(path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        buffer.write(file_bytes)
+    
+    supabase_path = f"{current_user['sub']}/{file_id}/original.pdf"
+    supabase.storage.from_("pdfs").upload(
+        path=supabase_path,
+        file=file_bytes,
+        file_options={"content-type": "application/pdf"}
+    )
     
     #using user id from supabase auth
     pdf = PDF(file_name = file.filename, 
-              storage_path = path, 
+              storage_path = path,
+              supabase_path=supabase_path, 
               user_id=current_user["sub"]
               )
 
     db.add(pdf)
     db.commit()
     db.refresh(pdf)
+    #conversion method called when uploaded
+    convert_pdf_to_pages(path, pdf.id, current_user["sub"], db)
+
     return pdf
 
 #Get all user pdfs
@@ -256,6 +324,55 @@ def get_my_pdfs(current_user = Depends(verify_token), db: Session = Depends(get_
 #def read_pdfs(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
 #    pdfs = db.query(PDF).offset(skip).limit(limit).all()
 #    return pdfs
+
+#PDF Page data contracts
+class PDFPageResponse(BaseModel):
+    id: int
+    pdf_id: int
+    image_path: str
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+#PDF Pages endpoints
+
+#Gets all pages paths
+@app.get("/pdf/{id}/pages", response_model=List[PDFPageResponse])
+def get_pdf_pages(id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+        pdf = db.query(PDF).filter(PDF.id == id).first()
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF not Found")
+        
+        if str(pdf.user_id) != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+        
+        pages = (db.query(PDF_Pages).filter(PDF_Pages.pdf_id == id).order_by(PDF_Pages.id).all())
+        return pages
+
+#Get Page PNG image
+@app.get("/pdf/{id}/pages/{page_number}", response_model=PDFPageResponse)
+def get_pdf_page(id : int, page_number : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
+    pdf = db.query(PDF).filter(PDF.id == id).first()
+    if pdf is None:
+        raise HTTPException(status_code=404, detail="PDF not Found")
+    if str(pdf.user_id) != current_user["sub"]:
+        raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+
+    local_path = f"storage/pdfs/{id}/pages/{page_number}.png"
+
+    if os.path.exists(local_path):
+        return FileResponse(path=local_path, media_type="image/png")
+    else:
+        page = db.query(PDF_Pages).filter(
+            PDF_Pages.pdf_id == id,
+            PDF_Pages.page_number == page_number
+        ).first()
+        if page is None or page.supabase_path is None:
+            raise HTTPException(status_code=404, detail="Page not Found")
+        signed = supabase.storage.from_("pdf-pages").create_signed_url(
+            page.supabase_path, expires_in=3600
+        )
+        return RedirectResponse(url=signed["signedURL"])
 
 #Return certain PDF data with the user id
 @app.get("/pdf/{id}", response_model=PDFResponse)
@@ -276,15 +393,18 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
     pdf = db.query(PDF).filter(PDF.id == id).first()
     if pdf is None:
         raise HTTPException(status_code=404, detail="PDF not Found")
-    
     if str(pdf.user_id) != current_user["sub"]:
         raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
-    
-    return FileResponse(
-        path=pdf.storage_path,
-        media_type="application/pdf",
-        filename=pdf.file_name 
-    )
+
+    if os.path.exists(pdf.storage_path):
+        return FileResponse(path=pdf.storage_path, media_type="application/pdf", filename=pdf.file_name)
+    else:
+        if pdf.supabase_path is None:
+            raise HTTPException(status_code=404, detail="File not Found")
+        signed = supabase.storage.from_("pdfs").create_signed_url(
+            pdf.supabase_path, expires_in=3600
+        )
+        return RedirectResponse(url=signed["signedURL"])
 
 #Summary Data Contracts
 class SummaryRequest(BaseModel):

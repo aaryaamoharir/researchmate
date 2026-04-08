@@ -22,7 +22,7 @@ class QdrantHandler:
         )
 
 
-    def create_collection(self, user_id, vector_size=1024, distance_metric=Distance.COSINE):
+    def create_collection(self, user_id, vector_size=128, distance_metric=Distance.COSINE):
 
         collection_name = f"user_{user_id}"
 
@@ -52,7 +52,7 @@ class QdrantHandler:
                     "vector": vector,
                     "payload": {
                         "pdf_id": pdf_id,
-                        "summary": supabase_client.table("pdfs").select("summary").eq("id", pdf_id).execute().data[0]["summary"], # no error handling here :/
+                        "summary": supabase_client.table("pdf_pages").select("summary").eq("pdf_id", pdf_id).eq("page_number", page_num).execute().data[0]['summary'],
                         "tags": {},  # Add tags here
                     }
                 }
