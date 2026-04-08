@@ -49,6 +49,7 @@ export default function SignUp() {
     }
   };
 
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-[#0e0e14] font-sans">
       <style>{`
