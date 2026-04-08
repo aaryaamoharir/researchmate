@@ -1,6 +1,7 @@
 from __future__ import annotations
 from mcp.server.fastmcp import FastMCP
 from MCPservers.app.tools.supabase import supabase_sql
+from MCPservers.app.tools.googlescholar import search_research
 
 mcp = FastMCP("research-papers")
 SUPABASE_PROJECT_URL = "https://hbutreqslisuwsjifmas.supabase.co"
@@ -70,6 +71,14 @@ def get_pdf_page_url(pdf_id: int, page_number: int) -> str:
     row = rows[0]
     path = row.get("supabase_path") or row.get("image_path")
     return f"{SUPABASE_PROJECT_URL}/storage/v1/object/public/pdf-pages/{path}"
+
+@mcp.tool()
+def search_scholar(query: str, total_results: int = 10, date_restrict: str = "y1") -> list[dict]:
+    """
+    Search research-like results using Google Custom Search.
+    date_restrict examples: d30, m6, y1, y5
+    """
+    return search_research(query, total_results=total_results, date_restrict=date_restrict, prefer_pdfs=True)
 
 if __name__ == "__main__":
     mcp.run()
