@@ -112,15 +112,6 @@ class PDF(Base):
     summaries = relationship("Summary", back_populates="pdf")
     pdf_pages = relationship("PDF_Pages", back_populates="pdf")
 
-class Summary(Base):
-    __tablename__ = "summaries"
-    id = Column(Integer, primary_key = True, index = True)
-    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
-    summary = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    pdf = relationship("PDF", back_populates="summaries")
-    #Create a model used var as well
-
 class PDF_Pages(Base):
     __tablename__ = "pdf_pages"
     id = Column(Integer, primary_key = True, index = True)
@@ -341,6 +332,20 @@ def create_pdf(file: UploadFile = File(...), db: Session = Depends(get_db), curr
         file=file_bytes,
         file_options={"content-type": "application/pdf", "upsert": "true"}
     )
+    pdf = PDF(
+    file_name=file.filename,
+    storage_path=path,
+    supabase_path=supabase_path,
+    user_id=uuid.UUID(current_user["sub"])
+    )
+    db.add(pdf)
+    db.commit()
+    db.refresh(pdf)
+
+    convert_pdf_to_pages(path, pdf.id, current_user["sub"], file_id, db)
+
+    return pdf
+
 #Get all user pdfs
 @app.get("/pdf/my_pdfs", response_model=List[PDFResponse])
 def get_my_pdfs(current_user=Depends(verify_token), db: Session = Depends(get_db)):
@@ -444,76 +449,6 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
         )
         return RedirectResponse(url=signed["signedURL"])
 
-#Summary Data Contracts
-class SummaryRequest(BaseModel):
-    pdf_id : int
-
-
-class SummaryResponse(BaseModel):
-    id : int
-    pdf_id : int
-    summary : str
-    created_at : datetime
-
-    model_config = ConfigDict(from_attributes=True)
-
-#Langgraph Data Contracts
-class LGSummaryInput(BaseModel): #input to AI as text of pdf
-    text: str
-
-class LGSummaryOutput(BaseModel): #output the summary of given text
-    summary: str
-
-def run_summary_agent(pdf_id: int) -> str: #AI Work, RAG model here
-    return "PlaceHold Summary"
-
-#def extract_text_from_pdf(path: str) -> str: not needed
- #   text = ""
-  #  with fitz.open(path) as doc:
-   #     for page in doc:
-    #        text += page.get_text()
-    # return text
-
-@app.post("/summary/", response_model=SummaryResponse)
-def create_summary(summary_request : SummaryRequest, db : Session = Depends(get_db), current_user = Depends(verify_token)):
-    pdf = db.query(PDF).filter(PDF.id == summary_request.pdf_id).first()
-    if pdf is None:
-        raise HTTPException(status_code=404, detail="PDF not Found")
-    
-   #text = extract_text_from_pdf(pdf.storage_path) #getting text from the pdf file
-    if str(pdf.user_id) != current_user["sub"]:
-        raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
-    
-    # generate summary
-    generated_summary = run_summary_agent(pdf.id)
-
-    summary = Summary(
-        pdf_id=summary_request.pdf_id,
-        summary=generated_summary
-    )
-
-    db.add(summary)
-    db.commit()
-    db.refresh(summary)
-    
-    return SummaryResponse(id = summary.id, pdf_id = summary.pdf_id, summary = summary.summary, created_at = summary.created_at)
-
-@app.get("/summary/{pdf_id}", response_model=SummaryResponse)
-def get_summary(pdf_id : int, db : Session = Depends(get_db), current_user = Depends(verify_token)):
-
-    pdf = db.query(PDF).filter(PDF.id == pdf_id).first()
-    if pdf is None:
-        raise HTTPException(status_code=404, detail="PDF not Found")
-    
-    if str(pdf.user_id) != current_user["sub"]:
-        raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
-    
-    summary = db.query(Summary).filter(Summary.pdf_id == pdf_id).first()
-    
-    if summary is None:
-        raise HTTPException(status_code=404, detail="Summary not Found")
-    
-    return summary
 
  
 @app.post("/notes/", response_model=StickyNoteResponse)
