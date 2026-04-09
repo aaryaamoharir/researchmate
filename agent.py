@@ -26,6 +26,8 @@ def retrieve(state: State) -> State:
 
     for hit in page_hits:
         payload = getattr(hit, "payload", {}) or {}
+        if payload.get("type") == "paper_summary":
+            continue
         score = getattr(hit, "score", 0.0)
         page_results.append(
             {
@@ -51,7 +53,6 @@ def retrieve(state: State) -> State:
 
 
 def generate(state: State) -> State:
-    """Generate an answer using retrieved page context."""
     if not state["page_results"]:
         state["response"] = "No relevant content found. Please index some papers first."
         return state
@@ -61,8 +62,8 @@ def generate(state: State) -> State:
     system_prompt = (
         "You are a helpful research assistant. Answer questions based on the "
         "provided context from research papers. Be concise and accurate. If the "
-        "context doesn't contain enough information to answer, say so. Always "
-        "cite the page numbers when referencing specific information."
+        "context doesn't contain enough information to answer, say so. "
+        
     )
 
     user_prompt = (
