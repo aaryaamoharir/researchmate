@@ -4,15 +4,20 @@ import hashlib
 import os
 from datetime import datetime, timezone
 
+import logging
+
 import fitz  # PyMuPDF
 import torch
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from llm_client import get_chat_model, get_groq_client
+
+logger = logging.getLogger(__name__)
+
 EMBED_DIM = 128  # ColQwen2 pooled embedding size
 COLLECTION = "papers"
-LEGACY_COLLECTIONS = ("papers_text", "papers_visual")
 
 _model = None
 _processor = None
@@ -37,7 +42,12 @@ def get_model():
 def get_client() -> QdrantClient:
     global _client
     if _client is None:
-        _client = QdrantClient(path="./qdrant_db")
+        url = os.environ.get("QDRANT_URL")
+        api_key = os.environ.get("QDRANT_API_KEY")
+        if url and api_key:
+            _client = QdrantClient(url=url, api_key=api_key)
+        else:
+            _client = QdrantClient(path="./qdrant_db")
     return _client
 
 
@@ -49,20 +59,10 @@ def _collection_exists(client: QdrantClient, name: str) -> bool:
         return False
 
 
-def _safe_delete_collection(client: QdrantClient, name: str) -> None:
-    try:
-        client.delete_collection(name)
-        print(f"Removed legacy collection '{name}'")
-    except Exception:
-        # Missing collection and unsupported delete API variants are both fine.
-        pass
+def create_collection(recreate: bool = False) -> None:
+    """Ensure the page-level collection exists.
 
-
-def create_collection(recreate: bool = False, drop_legacy: bool = True) -> None:
-    """Ensure the unified page-level collection exists.
-
-    `recreate=False` is non-destructive by default. Use `recreate=True` for a full
-    rebuild. Legacy collections can optionally be removed after cutover.
+    `recreate=False` is non-destructive by default. Use `recreate=True` for a full rebuild.
     """
     client = get_client()
 
@@ -80,11 +80,6 @@ def create_collection(recreate: bool = False, drop_legacy: bool = True) -> None:
         print(f"Created '{COLLECTION}' collection")
     else:
         print(f"Using existing '{COLLECTION}' collection")
-
-    if drop_legacy:
-        for legacy_name in LEGACY_COLLECTIONS:
-            if legacy_name != COLLECTION:
-                _safe_delete_collection(client, legacy_name)
 
 
 def _mean_pool_tensor(sample: torch.Tensor) -> list[float]:
@@ -173,6 +168,76 @@ def _render_page_image(page, dpi_scale: float):
     return img
 
 
+def _summarize_page(text: str, pdf_name: str, page_num: int) -> str:
+    """Summarize a single page's text using Groq."""
+    if not text.strip():
+        return ""
+    try:
+        client = get_groq_client()
+        response = client.chat.completions.create(
+            model=get_chat_model(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a research assistant. Summarize the following page "
+                        "from a research paper in 2-4 sentences. Capture the key "
+                        "points, data, or arguments. If the page is a references list "
+                        "or mostly boilerplate, say so briefly. "
+                        "Do NOT reproduce any raw text, equations, or math notation "
+                        "from the page. Only output your own summary in plain English."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"[{pdf_name} - Page {page_num}]\n\n{text[:8000]}",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=256,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.warning("Page summary failed (%s p%d): %s", pdf_name, page_num, exc)
+        return ""
+
+
+def _summarize_paper(page_summaries: list[str], pdf_name: str) -> str:
+    """Generate a summary-of-summaries for the entire paper."""
+    combined = "\n\n".join(
+        f"Page {i+1}: {s}" for i, s in enumerate(page_summaries) if s
+    )
+    if not combined.strip():
+        return ""
+    try:
+        client = get_groq_client()
+        response = client.chat.completions.create(
+            model=get_chat_model(),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a research assistant. Given per-page summaries of a "
+                        "research paper, produce a comprehensive summary of the entire "
+                        "paper. Include: 1) Main objective/problem, 2) Key methodology, "
+                        "3) Main findings/results, 4) Conclusions. Keep it concise "
+                        "(3-5 paragraphs)."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Paper: {pdf_name}\n\nPage summaries:\n{combined}",
+                },
+            ],
+            temperature=0.3,
+            max_tokens=800,
+        )
+        return response.choices[0].message.content or ""
+    except Exception as exc:
+        logger.warning("Paper summary failed (%s): %s", pdf_name, exc)
+        return ""
+
+
 def _flush_batch(
     *,
     client: QdrantClient,
@@ -202,6 +267,7 @@ def _flush_batch(
                     "pdf": pdf_path,
                     "page": row["page"],
                     "text": row["text"],
+                    "summary": row.get("summary", ""),
                     "type": "page",
                     "char_count": row["char_count"],
                     "indexed_at": indexed_at,
@@ -224,6 +290,7 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
 
     client = get_client()
     fingerprint = _pdf_fingerprint(pdf_path)
+    pdf_name = os.path.basename(pdf_path)
 
     doc = fitz.open(pdf_path)
     pages_seen = len(doc)
@@ -231,6 +298,8 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
 
     batch_images = []
     batch_rows: list[dict] = []
+    all_page_summaries: list[str] = []
+    paper_summary = ""
 
     try:
         for page_idx in range(pages_seen):
@@ -239,11 +308,17 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
             text = page.get_text() or ""
             image = _render_page_image(page, dpi_scale)
 
+            # Summarize this page
+            print(f"  Summarizing page {page_num}/{pages_seen}...")
+            page_summary = _summarize_page(text, pdf_name, page_num)
+            all_page_summaries.append(page_summary)
+
             batch_images.append(image)
             batch_rows.append(
                 {
                     "page": page_num,
                     "text": text,
+                    "summary": page_summary,
                     "char_count": len(text),
                 }
             )
@@ -269,6 +344,35 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
                 batch_rows=batch_rows,
                 batch_size=batch_size,
             )
+
+        # Generate and store paper-level summary-of-summaries
+        print(f"  Generating paper summary...")
+        paper_summary = _summarize_paper(all_page_summaries, pdf_name)
+        if paper_summary:
+            summary_point_id = _point_id(pdf_path, 0, fingerprint)
+            indexed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            # Use a zero vector — this point is for lookup, not similarity search
+            zero_vector = [0.0] * EMBED_DIM
+            client.upsert(
+                COLLECTION,
+                [
+                    PointStruct(
+                        id=summary_point_id,
+                        vector=zero_vector,
+                        payload={
+                            "pdf": pdf_path,
+                            "page": 0,
+                            "text": paper_summary,
+                            "summary": paper_summary,
+                            "type": "paper_summary",
+                            "page_summaries": all_page_summaries,
+                            "char_count": len(paper_summary),
+                            "indexed_at": indexed_at,
+                        },
+                    )
+                ],
+            )
+            print(f"  Stored paper summary")
     finally:
         doc.close()
 
@@ -276,6 +380,7 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
         "pdf": pdf_path,
         "pages_seen": pages_seen,
         "pages_indexed": pages_indexed,
+        "paper_summary": paper_summary,
         "collection": COLLECTION,
     }
     print(f"  Indexed {pages_indexed}/{pages_seen} pages into '{COLLECTION}'")
@@ -292,13 +397,3 @@ def search(query: str, top_k: int = 5) -> list:
         limit=top_k,
     )
     return results.points
-
-
-def search_all(query: str, top_k: int = 5) -> dict:
-    """Compatibility shim preserving the old API shape during migration."""
-    page_results = search(query, top_k)
-    return {
-        "pages": page_results,
-        "text": page_results,
-        "figures": [],
-    }

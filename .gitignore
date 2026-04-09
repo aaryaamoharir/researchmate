@@ -23,4 +23,5 @@ dist/
 .env
 .env.*
 
-qdrant_db/collections/
+qdrant_db/
+inspect_db.py

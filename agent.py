@@ -6,21 +6,10 @@ from typing import TypedDict
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
 
-from embeddings import search_all
-from llm_client import get_chat_model, get_deepseek_client
+from embeddings import search
+from llm_client import get_chat_model, get_groq_client
 
-# Load .env file
 load_dotenv()
-
-# Initialize DeepSeek/OpenAI-compatible client lazily via shared helper.
-_deepseek_client = None
-
-
-def get_deepseek_client_cached():
-    global _deepseek_client
-    if _deepseek_client is None:
-        _deepseek_client = get_deepseek_client()
-    return _deepseek_client
 
 
 class State(TypedDict):
@@ -32,9 +21,7 @@ class State(TypedDict):
 
 def retrieve(state: State) -> State:
     """Retrieve relevant pages from the unified vector collection."""
-    results = search_all(state["query"], top_k=5)
-
-    page_hits = results.get("pages") or results.get("text") or []
+    page_hits = search(state["query"], top_k=5)
     page_results: list[dict] = []
 
     for hit in page_hits:
@@ -45,30 +32,31 @@ def retrieve(state: State) -> State:
                 "pdf": payload.get("pdf", ""),
                 "page": payload.get("page", 0),
                 "text": payload.get("text", ""),
+                "summary": payload.get("summary", ""),
                 "score": score,
             }
         )
 
     state["page_results"] = page_results
 
-    # Build context from retrieved page text.
     context_parts = []
     for r in page_results:
         pdf_label = os.path.basename(r.get("pdf", "")) or "unknown.pdf"
         page = r.get("page", "?")
-        context_parts.append(f"[{pdf_label} Page {page}]: {r.get('text', '')}")
+        content = r.get("summary") or r.get("text", "")
+        context_parts.append(f"[{pdf_label} Page {page}]: {content}")
 
     state["context"] = "\n\n".join(context_parts)
     return state
 
 
 def generate(state: State) -> State:
-    """Generate an answer with DeepSeek using retrieved page context."""
+    """Generate an answer using retrieved page context."""
     if not state["page_results"]:
         state["response"] = "No relevant content found. Please index some papers first."
         return state
 
-    client = get_deepseek_client_cached()
+    client = get_groq_client()
 
     system_prompt = (
         "You are a helpful research assistant. Answer questions based on the "
@@ -100,19 +88,14 @@ def generate(state: State) -> State:
 
 def build_agent():
     graph = StateGraph(State)
-
     graph.add_node("retrieve", retrieve)
     graph.add_node("generate", generate)
-
     graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", END)
-
     graph.set_entry_point("retrieve")
-
     return graph.compile()
 
 
-# Compile agent
 agent = build_agent()
 
 

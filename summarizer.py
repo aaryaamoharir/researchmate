@@ -3,19 +3,11 @@ from __future__ import annotations
 import fitz  # PyMuPDF
 from dotenv import load_dotenv
 
-from llm_client import get_chat_model, get_deepseek_client
+from llm_client import get_chat_model, get_groq_client
 
 load_dotenv()
 
-_client = None
 MAX_SUMMARY_CHARS = 50000
-
-
-def get_client():
-    global _client
-    if _client is None:
-        _client = get_deepseek_client()
-    return _client
 
 
 def extract_full_text(pdf_path: str) -> str:
@@ -45,7 +37,7 @@ def summarize_paper(pdf_path: str) -> dict:
             "summary": "No text content found in this PDF.",
         }
 
-    client = get_client()
+    client = get_groq_client()
     text = _truncate_text(text)
 
     response = client.chat.completions.create(
