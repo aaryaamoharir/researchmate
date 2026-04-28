@@ -12,7 +12,10 @@ from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from dotenv import load_dotenv
 from llm_client import get_chat_model, get_groq_client
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
@@ -168,8 +171,20 @@ def _render_page_image(page, dpi_scale: float):
     return img
 
 
-def _summarize_page(text: str, pdf_name: str, page_num: int) -> str:
-    """Summarize a single page's text using Groq."""
+def _summarize_page(text: str, pdf_name: str, page_num: int, image=None) -> str:
+    """Summarize a page using Gemini vision (image) with text fallback to Groq."""
+    if image is not None:
+        try:
+            result = _summarize_page_gemini(image, pdf_name, page_num)
+            print(f"    [Gemini] Summarized page {page_num}")
+            return result
+        except Exception as exc:
+            print(f"    [Gemini FAILED] page {page_num}: {exc}")
+            logger.warning(
+                "Gemini summary failed (%s p%d), falling back to text: %s",
+                pdf_name, page_num, exc,
+            )
+    # Fallback: text-only summary via Groq
     if not text.strip():
         return ""
     try:
@@ -180,12 +195,13 @@ def _summarize_page(text: str, pdf_name: str, page_num: int) -> str:
                 {
                     "role": "system",
                     "content": (
-                        "You are a research assistant. Summarize the following page "
-                        "from a research paper in 2-4 sentences. Capture the key "
-                        "points, data, or arguments. If the page is a references list "
-                        "or mostly boilerplate, say so briefly. "
-                        "Do NOT reproduce any raw text, equations, or math notation "
-                        "from the page. Only output your own summary in plain English."
+                        "You are a research assistant. Summarize ONLY the content on "
+                        "this specific page in 2-4 sentences. Focus on what makes this "
+                        "page unique — what specific topic, data, method, figure, or "
+                        "argument appears HERE and not on other pages. "
+                        "Do NOT give a general overview of the whole paper. "
+                        "Do NOT reproduce any raw text, equations, or math notation. "
+                        "If the page is a references list or mostly boilerplate, say so briefly."
                     ),
                 },
                 {
@@ -200,6 +216,53 @@ def _summarize_page(text: str, pdf_name: str, page_num: int) -> str:
     except Exception as exc:
         logger.warning("Page summary failed (%s p%d): %s", pdf_name, page_num, exc)
         return ""
+
+
+def _summarize_page_gemini(image, pdf_name: str, page_num: int) -> str:
+    """Summarize a page image using Gemini vision (new google.genai SDK)."""
+    import io
+
+    from google import genai
+    from google.genai import types
+
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        from dotenv import load_dotenv
+        load_dotenv(override=True)
+        api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise ValueError("Missing GEMINI_API_KEY")
+
+    client = genai.Client(api_key=api_key)
+
+    # Convert PIL image to bytes
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    image_bytes = buf.getvalue()
+
+    prompt = (
+        f"This is page {page_num} from the research paper '{pdf_name}'. "
+        "Summarize ONLY the content on this specific page in 2-4 sentences. "
+        "Describe any figures, diagrams, tables, or charts you see — what they "
+        "show, their axes, trends, and key takeaways. "
+        "Focus on what makes this page unique. "
+        "Do NOT give a general overview of the whole paper. "
+        "Do NOT reproduce raw equations or math notation."
+    )
+
+    response = client.models.generate_content(
+        model="gemini-3-flash-preview",
+        contents=[
+            prompt,
+            types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+        ],
+        config=types.GenerateContentConfig(
+            temperature=0.3,
+            max_output_tokens=1024,
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        ),
+    )
+    return response.text or ""
 
 
 def _summarize_paper(page_summaries: list[str], pdf_name: str) -> str:
@@ -292,6 +355,22 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
     fingerprint = _pdf_fingerprint(pdf_path)
     pdf_name = os.path.basename(pdf_path)
 
+    # Optional Supabase sync — skips silently if not configured or not installed
+    _supabase_sync = False
+    _sb_insert_pdf = None
+    _sb_insert_page = None
+    _sb_insert_summary = None
+    try:
+        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
+            from supabase_client import insert_pdf, insert_pdf_page, insert_paper_summary
+
+            _sb_insert_pdf = insert_pdf
+            _sb_insert_page = insert_pdf_page
+            _sb_insert_summary = insert_paper_summary
+            _supabase_sync = True
+    except ImportError:
+        logger.info("supabase package not installed — skipping Supabase sync")
+
     doc = fitz.open(pdf_path)
     pages_seen = len(doc)
     pages_indexed = 0
@@ -300,6 +379,15 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
     batch_rows: list[dict] = []
     all_page_summaries: list[str] = []
     paper_summary = ""
+
+    # Insert PDF record into Supabase
+    supabase_pdf_id = None
+    if _supabase_sync:
+        try:
+            supabase_pdf_id = _sb_insert_pdf(pdf_name)
+            print(f"  Created Supabase PDF record (id={supabase_pdf_id})")
+        except Exception as exc:
+            logger.warning("Supabase PDF insert failed: %s", exc)
 
     try:
         for page_idx in range(pages_seen):
@@ -310,8 +398,15 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
 
             # Summarize this page
             print(f"  Summarizing page {page_num}/{pages_seen}...")
-            page_summary = _summarize_page(text, pdf_name, page_num)
+            page_summary = _summarize_page(text, pdf_name, page_num, image=image)
             all_page_summaries.append(page_summary)
+
+            # Sync page summary to Supabase
+            if supabase_pdf_id is not None:
+                try:
+                    _sb_insert_page(supabase_pdf_id, page_num, page_summary)
+                except Exception as exc:
+                    logger.warning("Supabase page insert failed (p%d): %s", page_num, exc)
 
             batch_images.append(image)
             batch_rows.append(
@@ -373,6 +468,14 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
                 ],
             )
             print(f"  Stored paper summary")
+
+            # Sync paper summary to Supabase
+            if supabase_pdf_id is not None:
+                try:
+                    _sb_insert_summary(supabase_pdf_id, paper_summary)
+                    print(f"  Stored paper summary in Supabase")
+                except Exception as exc:
+                    logger.warning("Supabase summary insert failed: %s", exc)
     finally:
         doc.close()
 

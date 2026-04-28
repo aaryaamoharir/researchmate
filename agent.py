@@ -21,7 +21,7 @@ class State(TypedDict):
 
 def retrieve(state: State) -> State:
     """Retrieve relevant pages from the unified vector collection."""
-    page_hits = search(state["query"], top_k=5)
+    page_hits = search(state["query"], top_k=10)
     page_results: list[dict] = []
 
     for hit in page_hits:
@@ -61,9 +61,10 @@ def generate(state: State) -> State:
 
     system_prompt = (
         "You are a helpful research assistant. Answer questions based on the "
-        "provided context from research papers. Be concise and accurate. If the "
-        "context doesn't contain enough information to answer, say so. "
-        
+        "provided context from research papers. Be concise and accurate. "
+        "Treat 'Fig.', 'Figure', and 'fig' as equivalent when matching references. "
+        "Always cite which page the information comes from. "
+        "Only say you cannot answer if the context truly contains no relevant information."
     )
 
     user_prompt = (
