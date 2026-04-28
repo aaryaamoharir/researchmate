@@ -3,13 +3,10 @@ from __future__ import annotations
 import os
 from typing import TypedDict
 
-from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
 
 from embeddings import search
 from llm_client import get_chat_model, get_groq_client
-
-load_dotenv()
 
 
 class State(TypedDict):
@@ -62,7 +59,6 @@ def generate(state: State) -> State:
     system_prompt = (
         "You are a helpful research assistant. Answer questions based on the "
         "provided context from research papers. Be concise and accurate. "
-        "Treat 'Fig.', 'Figure', and 'fig' as equivalent when matching references. "
         "Always cite which page the information comes from. "
         "Only say you cannot answer if the context truly contains no relevant information."
     )

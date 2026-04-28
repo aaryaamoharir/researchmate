@@ -1,18 +1,18 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import logging
 import os
 from datetime import datetime, timezone
 
-import logging
-
 import fitz  # PyMuPDF
 import torch
+from dotenv import load_dotenv
 from PIL import Image
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from dotenv import load_dotenv
 from llm_client import get_chat_model, get_groq_client
 
 load_dotenv()
@@ -22,9 +22,19 @@ logger = logging.getLogger(__name__)
 EMBED_DIM = 128  # ColQwen2 pooled embedding size
 COLLECTION = "papers"
 
+_PAGE_SUMMARY_PROMPT = (
+    "Summarize ONLY the content on this specific page in 2-4 sentences. "
+    "Focus on what makes this page unique — what specific topic, data, method, "
+    "figure, or argument appears HERE and not on other pages. "
+    "Do NOT give a general overview of the whole paper. "
+    "Do NOT reproduce any raw text, equations, or math notation. "
+    "If the page is a references list or mostly boilerplate, say so briefly."
+)
+
 _model = None
 _processor = None
 _client = None
+_gemini_client = None
 
 
 def get_model():
@@ -54,6 +64,19 @@ def get_client() -> QdrantClient:
     return _client
 
 
+def _get_gemini_client():
+    """Return a singleton Gemini client."""
+    global _gemini_client
+    if _gemini_client is None:
+        from google import genai
+
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("Missing GEMINI_API_KEY")
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
+
+
 def _collection_exists(client: QdrantClient, name: str) -> bool:
     try:
         client.get_collection(name)
@@ -74,15 +97,15 @@ def create_collection(recreate: bool = False) -> None:
             COLLECTION,
             vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
         )
-        print(f"Recreated '{COLLECTION}' collection")
+        logger.info("Recreated '%s' collection", COLLECTION)
     elif not _collection_exists(client, COLLECTION):
         client.create_collection(
             COLLECTION,
             vectors_config=VectorParams(size=EMBED_DIM, distance=Distance.COSINE),
         )
-        print(f"Created '{COLLECTION}' collection")
+        logger.info("Created '%s' collection", COLLECTION)
     else:
-        print(f"Using existing '{COLLECTION}' collection")
+        logger.info("Using existing '%s' collection", COLLECTION)
 
 
 def _mean_pool_tensor(sample: torch.Tensor) -> list[float]:
@@ -172,97 +195,57 @@ def _render_page_image(page, dpi_scale: float):
 
 
 def _summarize_page(text: str, pdf_name: str, page_num: int, image=None) -> str:
-    """Summarize a page using Gemini vision (image) with text fallback to Groq."""
-    if image is not None:
-        try:
-            result = _summarize_page_gemini(image, pdf_name, page_num)
-            print(f"    [Gemini] Summarized page {page_num}")
-            return result
-        except Exception as exc:
-            print(f"    [Gemini FAILED] page {page_num}: {exc}")
-            logger.warning(
-                "Gemini summary failed (%s p%d), falling back to text: %s",
-                pdf_name, page_num, exc,
-            )
-    # Fallback: text-only summary via Groq
-    if not text.strip():
+    """Summarize a page using Gemini vision."""
+    if image is None:
+        logger.warning("No image for page %d — skipping summary", page_num)
         return ""
-    try:
-        client = get_groq_client()
-        response = client.chat.completions.create(
-            model=get_chat_model(),
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a research assistant. Summarize ONLY the content on "
-                        "this specific page in 2-4 sentences. Focus on what makes this "
-                        "page unique — what specific topic, data, method, figure, or "
-                        "argument appears HERE and not on other pages. "
-                        "Do NOT give a general overview of the whole paper. "
-                        "Do NOT reproduce any raw text, equations, or math notation. "
-                        "If the page is a references list or mostly boilerplate, say so briefly."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"[{pdf_name} - Page {page_num}]\n\n{text[:8000]}",
-                },
-            ],
-            temperature=0.3,
-            max_tokens=256,
-        )
-        return response.choices[0].message.content or ""
-    except Exception as exc:
-        logger.warning("Page summary failed (%s p%d): %s", pdf_name, page_num, exc)
-        return ""
+    result = _summarize_page_gemini(image, pdf_name, page_num)
+    logger.info("Gemini summarized page %d", page_num)
+    return result
 
 
-def _summarize_page_gemini(image, pdf_name: str, page_num: int) -> str:
-    """Summarize a page image using Gemini vision (new google.genai SDK)."""
-    import io
+def _summarize_page_gemini(image, pdf_name: str, page_num: int, max_retries: int = 3) -> str:
+    """Summarize a page image using Gemini vision, with retries on transient errors."""
+    import time
 
-    from google import genai
     from google.genai import types
 
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        from dotenv import load_dotenv
-        load_dotenv(override=True)
-        api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError("Missing GEMINI_API_KEY")
+    gemini = _get_gemini_client()
 
-    client = genai.Client(api_key=api_key)
-
-    # Convert PIL image to bytes
     buf = io.BytesIO()
     image.save(buf, format="PNG")
     image_bytes = buf.getvalue()
+    buf.close()
 
     prompt = (
         f"This is page {page_num} from the research paper '{pdf_name}'. "
-        "Summarize ONLY the content on this specific page in 2-4 sentences. "
-        "Describe any figures, diagrams, tables, or charts you see — what they "
-        "show, their axes, trends, and key takeaways. "
-        "Focus on what makes this page unique. "
-        "Do NOT give a general overview of the whole paper. "
-        "Do NOT reproduce raw equations or math notation."
+        + _PAGE_SUMMARY_PROMPT
+        + " Describe any figures, diagrams, tables, or charts you see — what they "
+        "show, their axes, trends, and key takeaways."
     )
 
-    response = client.models.generate_content(
-        model="gemini-3-flash-preview",
-        contents=[
-            prompt,
-            types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
-        ],
-        config=types.GenerateContentConfig(
-            temperature=0.3,
-            max_output_tokens=1024,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    return response.text or ""
+    for attempt in range(max_retries):
+        try:
+            response = gemini.models.generate_content(
+                model="gemini-3-flash-preview",
+                contents=[
+                    prompt,
+                    types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                ],
+                config=types.GenerateContentConfig(
+                    temperature=0.3,
+                    max_output_tokens=1024,
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
+                ),
+            )
+            return response.text or ""
+        except Exception as exc:
+            if attempt < max_retries - 1 and ("503" in str(exc) or "UNAVAILABLE" in str(exc)):
+                wait = 2 ** attempt
+                logger.warning("Gemini 503 on page %d, retrying in %ds...", page_num, wait)
+                time.sleep(wait)
+            else:
+                raise
 
 
 def _summarize_paper(page_summaries: list[str], pdf_name: str) -> str:
@@ -344,6 +327,10 @@ def _flush_batch(
     return len(points)
 
 
+def _is_supabase_configured() -> bool:
+    return bool(os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"))
+
+
 def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dict:
     """Render PDF pages to images, embed them, and upsert to the unified collection."""
     if batch_size <= 0:
@@ -357,16 +344,10 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
 
     # Optional Supabase sync — skips silently if not configured or not installed
     _supabase_sync = False
-    _sb_insert_pdf = None
-    _sb_insert_page = None
-    _sb_insert_summary = None
     try:
-        if os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_KEY"):
-            from supabase_client import insert_pdf, insert_pdf_page, insert_paper_summary
+        if _is_supabase_configured():
+            from supabase_client import upsert_pdf, insert_pdf_pages, insert_paper_summary
 
-            _sb_insert_pdf = insert_pdf
-            _sb_insert_page = insert_pdf_page
-            _sb_insert_summary = insert_paper_summary
             _supabase_sync = True
     except ImportError:
         logger.info("supabase package not installed — skipping Supabase sync")
@@ -384,8 +365,8 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
     supabase_pdf_id = None
     if _supabase_sync:
         try:
-            supabase_pdf_id = _sb_insert_pdf(pdf_name)
-            print(f"  Created Supabase PDF record (id={supabase_pdf_id})")
+            supabase_pdf_id = upsert_pdf(pdf_name)
+            logger.info("Created Supabase PDF record (id=%s)", supabase_pdf_id)
         except Exception as exc:
             logger.warning("Supabase PDF insert failed: %s", exc)
 
@@ -396,17 +377,9 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
             text = page.get_text() or ""
             image = _render_page_image(page, dpi_scale)
 
-            # Summarize this page
-            print(f"  Summarizing page {page_num}/{pages_seen}...")
+            logger.info("Summarizing page %d/%d...", page_num, pages_seen)
             page_summary = _summarize_page(text, pdf_name, page_num, image=image)
             all_page_summaries.append(page_summary)
-
-            # Sync page summary to Supabase
-            if supabase_pdf_id is not None:
-                try:
-                    _sb_insert_page(supabase_pdf_id, page_num, page_summary)
-                except Exception as exc:
-                    logger.warning("Supabase page insert failed (p%d): %s", page_num, exc)
 
             batch_images.append(image)
             batch_rows.append(
@@ -440,13 +413,20 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
                 batch_size=batch_size,
             )
 
+        # Batch-insert page summaries to Supabase
+        if supabase_pdf_id is not None:
+            try:
+                insert_pdf_pages(supabase_pdf_id, all_page_summaries)
+                logger.info("Stored %d page summaries in Supabase", len(all_page_summaries))
+            except Exception as exc:
+                logger.warning("Supabase page insert failed: %s", exc)
+
         # Generate and store paper-level summary-of-summaries
-        print(f"  Generating paper summary...")
+        logger.info("Generating paper summary...")
         paper_summary = _summarize_paper(all_page_summaries, pdf_name)
         if paper_summary:
             summary_point_id = _point_id(pdf_path, 0, fingerprint)
             indexed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-            # Use a zero vector — this point is for lookup, not similarity search
             zero_vector = [0.0] * EMBED_DIM
             client.upsert(
                 COLLECTION,
@@ -467,13 +447,12 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
                     )
                 ],
             )
-            print(f"  Stored paper summary")
+            logger.info("Stored paper summary in Qdrant")
 
-            # Sync paper summary to Supabase
             if supabase_pdf_id is not None:
                 try:
-                    _sb_insert_summary(supabase_pdf_id, paper_summary)
-                    print(f"  Stored paper summary in Supabase")
+                    insert_paper_summary(supabase_pdf_id, paper_summary)
+                    logger.info("Stored paper summary in Supabase")
                 except Exception as exc:
                     logger.warning("Supabase summary insert failed: %s", exc)
     finally:
@@ -486,7 +465,7 @@ def index_pdf(pdf_path: str, batch_size: int = 8, dpi_scale: float = 2.0) -> dic
         "paper_summary": paper_summary,
         "collection": COLLECTION,
     }
-    print(f"  Indexed {pages_indexed}/{pages_seen} pages into '{COLLECTION}'")
+    logger.info("Indexed %d/%d pages into '%s'", pages_indexed, pages_seen, COLLECTION)
     return result
 
 
