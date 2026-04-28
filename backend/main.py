@@ -617,7 +617,6 @@ def delete_note(
         raise HTTPException(status_code=403, detail="Not authorized")
  
     db.delete(note)
-<<<<<<< HEAD
     db.commit()
 
 
@@ -648,7 +647,3 @@ app = FastAPI(lifespan=lifespan)
   #  import asyncio
 
    # asyncio.create_task(summary_worker())
-
-=======
-    db.commit()
->>>>>>> f403de258bd5b3f2ee4ef8d4720c8ab2364626a3
