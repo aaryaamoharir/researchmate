@@ -622,3 +622,33 @@ def delete_note(
  
     db.delete(note)
     db.commit()
+
+
+#background worker
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+import asyncio
+from worker import summary_worker
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(summary_worker())
+
+    yield  # app runs here
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(lifespan=lifespan)
+
+#backup if no work
+#@app.on_event("startup")
+#async def start_worker():
+ #   from worker import summary_worker
+  #  import asyncio
+
+   # asyncio.create_task(summary_worker())
+
