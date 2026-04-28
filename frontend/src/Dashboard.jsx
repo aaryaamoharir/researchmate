@@ -38,7 +38,7 @@ function StickyNoteWidget({ note, onUpdate, onDelete }) {
     const dy = e.clientY - dragStart.current.my;
     onUpdate(note.id, { x: dragStart.current.nx + dx, y: dragStart.current.ny + dy }, false);
   }, [dragging, note.id, onUpdate]);
-  // Persist position on drag end
+
   const onMouseUp = useCallback(() => {
     setDragging(false);
     onUpdate(note.id, { x: note.x, y: note.y }, true);
@@ -55,13 +55,12 @@ function StickyNoteWidget({ note, onUpdate, onDelete }) {
     };
   }, [dragging, onMouseMove, onMouseUp]);
 
-  // Debounced text save
   const handleTextChange = (e) => {
     const text = e.target.value;
-    onUpdate(note.id, { text }, false);          // update local state immediately
+    onUpdate(note.id, { text }, false);
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      onUpdate(note.id, { text }, true);         // persist after 600 ms of quiet
+      onUpdate(note.id, { text }, true);
     }, 600);
   };
 
@@ -89,7 +88,6 @@ function StickyNoteWidget({ note, onUpdate, onDelete }) {
         animation: note.fresh ? 'noteIn 0.18s ease both' : undefined,
       }}
     >
-      {/* Header */}
       <div style={{
         display: 'flex', alignItems: 'center', justifyContent: 'space-between',
         padding: '5px 7px 4px',
@@ -114,7 +112,6 @@ function StickyNoteWidget({ note, onUpdate, onDelete }) {
           <Trash2 size={11} />
         </button>
       </div>
-      {/* Body */}
       <textarea
         autoFocus={note.fresh}
         value={note.text}
@@ -141,7 +138,6 @@ function PdfViewer({ pdfId, notes, noteMode, onPlaceNote, onUpdateNote, onDelete
     if (!pdfId) return;
     setLoading(true);
     setPages([]);
-
     fetch(`${API}/pdf/${pdfId}/pages`, { headers: authHeaders() })
       .then(res => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
       .then(data => setPages(Array.isArray(data) ? data : []))
@@ -231,7 +227,7 @@ function AuthImage({ src, alt, style }) {
   return <img src={blobUrl} alt={alt} style={style} />;
 }
 
-// ─── DUMMY SUMMARIES (unchanged) ──────────────────────────────────────────────
+// ─── Dummy summaries ──────────────────────────────────────────────────────────
 const DUMMY_SUMMARIES = [
   { section: "Abstract",     summary: "Novel framework for large-scale distributed systems addressing latency and fault-tolerance in cloud-native environments.", page: 1 },
   { section: "Introduction", summary: "Highlights 3× data throughput requirements for modern apps; introduces a new consensus algorithm and adaptive load-balancer.", page: 2 },
@@ -242,6 +238,12 @@ const DUMMY_SUMMARIES = [
   { section: "Conclusion",   summary: "Adaptive consensus + gossip heartbeats significantly improves resilience without sacrificing throughput.", page: 17 },
 ];
 
+const SUGGESTED_PROMPTS = [
+  'Summarise the methodology',
+  'What are the main findings?',
+  'List all limitations mentioned',
+];
+
 // ─── Dashboard ────────────────────────────────────────────────────────────────
 export default function Dashboard() {
   const [uploadedFile, setUploadedFile]     = useState(null);
@@ -249,28 +251,58 @@ export default function Dashboard() {
   const [myPdfs, setMyPdfs]                 = useState([]);
   const [sidebarOpen, setSidebarOpen]       = useState(false);
   const [uploading, setUploading]           = useState(false);
-  const [chatOpen, setChatOpen]             = useState(false);
-  const [chatMessage, setChatMessage]       = useState('');
   const [isDragging, setIsDragging]         = useState(false);
   const [activeFileName, setActiveFileName] = useState('');
 
-  // notes shape: { id (DB id or temp), pageIndex, pageNumber, x, y, text, colorIdx, fresh, synced }
-  const [notes, setNotes]         = useState([]);
-  const [noteMode, setNoteMode]   = useState(false);
-  const [nextColor, setNextColor] = useState(0);
+  // Notes
+  const [notes, setNotes]               = useState([]);
+  const [noteMode, setNoteMode]         = useState(false);
+  const [nextColor, setNextColor]       = useState(0);
   const [notesLoading, setNotesLoading] = useState(false);
+
+  // Chat
+  const [chatOpen, setChatOpen]         = useState(false);
+  const [summariesOpen, setSummariesOpen] = useState(true);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatMessage, setChatMessage]   = useState('');
+  const [chatLoading, setChatLoading]   = useState(false);
+  const chatEndRef                      = useRef(null);
+
+  // Splitter
+  const [split, setSplit]       = useState(50); // left panel width %
+  const draggingSplit           = useRef(false);
 
   const fileInputRef = useRef(null);
   const pdfLoaded = !!pdfId;
 
   useEffect(() => { fetchMyPdfs(); }, []);
 
-  // Load notes from DB whenever active PDF changes
   useEffect(() => {
     setNotes([]);
     setNoteMode(false);
+    setChatMessages([]);
     if (pdfId) loadNotesForPdf(pdfId);
   }, [pdfId]);
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatMessages]);
+
+  // ── Splitter mouse events ─────────────────────────────────────────────────
+  useEffect(() => {
+    const onMove = (e) => {
+      if (!draggingSplit.current) return;
+      const percent = (e.clientX / window.innerWidth) * 100;
+      if (percent > 20 && percent < 80) setSplit(percent);
+    };
+    const onUp = () => { draggingSplit.current = false; };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, []);
 
   const fetchMyPdfs = async () => {
     try {
@@ -279,15 +311,13 @@ export default function Dashboard() {
     } catch (err) { console.error(err); }
   };
 
-  // ── Note loading ────────────────────────────────────────────────────────────
+  // ── Note loading ──────────────────────────────────────────────────────────
   const loadNotesForPdf = async (id) => {
     setNotesLoading(true);
     try {
       const res = await fetch(`${API}/notes/${id}`, { headers: authHeaders() });
       if (!res.ok) return;
       const data = await res.json();
-      // Map DB records → local shape.
-      // pageIndex = page_number - 1  (DB stores 1-based page numbers)
       const mapped = data.map(n => ({
         id:         n.id,
         pageIndex:  n.page_number - 1,
@@ -307,11 +337,8 @@ export default function Dashboard() {
     }
   };
 
-  // ── Note CRUD with DB sync ──────────────────────────────────────────────────
-
-  /** Called by PdfViewer when the user clicks to place a new note */
+  // ── Note CRUD ─────────────────────────────────────────────────────────────
   const handlePlaceNote = async (pageIndex, pageNumber, x, y) => {
-    // Optimistic local insert with a temp id
     const tempId = `temp-${Date.now()}`;
     const colorIdx = nextColor;
     setNotes(prev => [...prev, {
@@ -325,56 +352,30 @@ export default function Dashboard() {
       const res = await fetch(`${API}/notes/`, {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({
-          pdf_id:      pdfId,
-          page_number: pageNumber,
-          text:        '',
-          x, y,
-          color_idx:   colorIdx,
-        }),
+        body: JSON.stringify({ pdf_id: pdfId, page_number: pageNumber, text: '', x, y, color_idx: colorIdx }),
       });
       if (!res.ok) throw new Error('Create failed');
       const created = await res.json();
-      // Replace temp id with real DB id
       setNotes(current =>
-        current.map(n =>
-          n.id === tempId
-            ? { ...n, id: created.id, synced: true }
-            : n
-        )
+        current.map(n => n.id === tempId ? { ...n, id: created.id, synced: true } : n)
       );
     } catch (err) {
       console.error('Failed to save note:', err);
-      // Roll back the optimistic insert
       setNotes(prev => prev.filter(n => n.id !== tempId));
     }
   };
 
-  /**
-   * updateNote is called by StickyNoteWidget.
-   * `persist = true`  → also PATCH the DB
-   * `persist = false` → local state only (e.g. during drag)
-   */
   const updateNote = useCallback(async (id, changes, persist) => {
     setNotes(prev => prev.map(n => n.id === id ? { ...n, ...changes, fresh: false } : n));
-
     if (!persist || String(id).startsWith('temp-')) return;
-
     try {
       const body = {};
-      if (changes.text      !== undefined) body.text      = changes.text;
-      if (changes.x         !== undefined) body.x         = changes.x;
-      if (changes.y         !== undefined) body.y         = changes.y;
-      if (changes.colorIdx  !== undefined) body.color_idx = changes.colorIdx;
-
-      await fetch(`${API}/notes/${id}`, {
-        method: 'PATCH',
-        headers: authHeaders(),
-        body: JSON.stringify(body),
-      });
-    } catch (err) {
-      console.error('Failed to update note:', err);
-    }
+      if (changes.text     !== undefined) body.text      = changes.text;
+      if (changes.x        !== undefined) body.x         = changes.x;
+      if (changes.y        !== undefined) body.y         = changes.y;
+      if (changes.colorIdx !== undefined) body.color_idx = changes.colorIdx;
+      await fetch(`${API}/notes/${id}`, { method: 'PATCH', headers: authHeaders(), body: JSON.stringify(body) });
+    } catch (err) { console.error('Failed to update note:', err); }
   }, []);
 
   const deleteNote = useCallback(async (id) => {
@@ -382,9 +383,7 @@ export default function Dashboard() {
     if (String(id).startsWith('temp-')) return;
     try {
       await fetch(`${API}/notes/${id}`, { method: 'DELETE', headers: authHeaders() });
-    } catch (err) {
-      console.error('Failed to delete note:', err);
-    }
+    } catch (err) { console.error('Failed to delete note:', err); }
   }, []);
 
   const clearAllNotes = async () => {
@@ -398,7 +397,31 @@ export default function Dashboard() {
     );
   };
 
-  // ── File handling ────────────────────────────────────────────────────────────
+  // ── Chat ──────────────────────────────────────────────────────────────────
+  const handleSendMessage = async (overrideText) => {
+    const text = (overrideText ?? chatMessage).trim();
+    if (!text || chatLoading) return;
+    setChatMessage('');
+    const userMsg = { role: 'user', content: text };
+    setChatMessages(prev => [...prev, userMsg]);
+    setChatLoading(true);
+    try {
+      const res = await fetch(`${API}/chat`, {
+        method: 'POST',
+        headers: authHeaders(),
+        body: JSON.stringify({ pdf_id: pdfId, messages: [...chatMessages, userMsg] }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setChatMessages(prev => [...prev, { role: 'assistant', content: data.reply }]);
+    } catch {
+      setChatMessages(prev => [...prev, { role: 'assistant', content: '⚠ Failed to reach server.' }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
+  // ── File handling ─────────────────────────────────────────────────────────
   const handleFileUpload = async (file) => {
     if (!file || file.type !== 'application/pdf') return;
     setUploadedFile(file);
@@ -434,6 +457,7 @@ export default function Dashboard() {
   const handleReset = () => {
     setPdfId(null); setUploadedFile(null); setActiveFileName('');
     setSidebarOpen(false); setNotes([]); setNoteMode(false);
+    setChatOpen(false); setChatMessages([]);
   };
 
   return (
@@ -446,6 +470,7 @@ export default function Dashboard() {
         @keyframes spin    { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
         @keyframes slideIn { from { opacity:0; transform:translateX(-6px); } to { opacity:1; transform:translateX(0); } }
         @keyframes noteIn  { from { opacity:0; transform:scale(0.86) translateY(8px); } to { opacity:1; transform:scale(1) translateY(0); } }
+        @keyframes pulse   { 0%,100% { opacity:0.4; transform:scale(0.85); } 50% { opacity:1; transform:scale(1); } }
         .fade-up     { animation: fadeUp 0.4s ease both; }
         .fade-up-pdf { animation: fadeUp 0.35s ease both; }
         .spin        { animation: spin 1s linear infinite; }
@@ -456,14 +481,23 @@ export default function Dashboard() {
         .pdf-item:hover    { background: #1c1c2e !important; }
         .recent-card:hover { border-color: #3a3a5e !important; }
         .mono { font-family: 'JetBrains Mono', monospace; }
-        .note-active { background: rgba(167,139,250,0.18) !important; color: #c4b5fd !important; border-color: #a78bfa !important; }
+        .note-active  { background: rgba(167,139,250,0.18) !important; color: #c4b5fd !important; border-color: #a78bfa !important; }
+        .chat-active  { background: rgba(167,139,250,0.18) !important; color: #c4b5fd !important; border-color: #a78bfa !important; }
+        .chat-input:focus { border-color: #a78bfa !important; }
+        .send-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .prompt-chip:hover { border-color: #a78bfa !important; color: #c4b5fd !important; }
+        .split-handle:hover > div { background: #a78bfa !important; }
       `}</style>
 
       {/* ── Sidebar ── */}
-      <div className="flex-shrink-0 h-screen overflow-hidden bg-[#13131d] border-r border-[#1a1a28] transition-all duration-300"
-        style={{ width: sidebarOpen ? '240px' : '0px' }}>
-        <div className="w-[240px] h-full flex flex-col"
-          style={{ opacity: sidebarOpen ? 1 : 0, pointerEvents: sidebarOpen ? 'auto' : 'none', transition: 'opacity 0.18s' }}>
+      <div
+        className="flex-shrink-0 h-screen overflow-hidden bg-[#13131d] border-r border-[#1a1a28] transition-all duration-300"
+        style={{ width: sidebarOpen ? '240px' : '0px' }}
+      >
+        <div
+          className="w-[240px] h-full flex flex-col"
+          style={{ opacity: sidebarOpen ? 1 : 0, pointerEvents: sidebarOpen ? 'auto' : 'none', transition: 'opacity 0.18s' }}
+        >
           <div className="flex items-center justify-between px-4 pt-[18px] pb-3.5 border-b border-[#1a1a28]">
             <span className="text-[11px] font-semibold uppercase tracking-widest text-[#55557a]">Your Library</span>
             <button className="text-[#606080] hover:text-[#a78bfa] transition-colors p-1" onClick={() => setSidebarOpen(false)}>
@@ -474,10 +508,12 @@ export default function Dashboard() {
             {myPdfs.length === 0
               ? <p className="text-[12px] text-[#44445a] px-2.5 py-2">No PDFs yet.</p>
               : myPdfs.map(pdf => (
-                <div key={pdf.id}
+                <div
+                  key={pdf.id}
                   className="pdf-item slide-in flex items-center gap-2.5 px-2.5 py-2 rounded-lg cursor-pointer transition-colors"
                   style={{ background: pdf.id === pdfId ? '#1c1c2e' : 'transparent' }}
-                  onClick={() => handleLoadExistingPdf(pdf)}>
+                  onClick={() => handleLoadExistingPdf(pdf)}
+                >
                   <FileText size={13} className="text-[#a78bfa] flex-shrink-0" />
                   <span className="text-[12px] text-[#b0b0d0] truncate">{pdf.file_name}</span>
                 </div>
@@ -491,38 +527,60 @@ export default function Dashboard() {
 
         {/* Top Bar */}
         <div className="flex items-center gap-3.5 px-5 py-3.5 border-b border-[#1a1a28] flex-shrink-0">
-          <button className="text-[#606080] hover:text-[#a78bfa] transition-colors p-1.5 rounded-lg"
-            onClick={() => setSidebarOpen(!sidebarOpen)}>
+          <button
+            className="text-[#606080] hover:text-[#a78bfa] transition-colors p-1.5 rounded-lg"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+          >
             <Menu size={20} />
           </button>
           <span className="text-[17px] font-semibold tracking-tight text-[#c4b5fd] flex-1">paperwise</span>
 
           {pdfLoaded && (
             <div className="flex items-center gap-2">
-              {notesLoading && (
-                <Loader2 size={13} className="spin text-[#7878a8]" />
-              )}
+              {notesLoading && <Loader2 size={13} className="spin text-[#7878a8]" />}
+
               {notes.length > 0 && !notesLoading && (
                 <>
                   <span className="mono text-[11px] text-[#7878a8] px-2 py-1 bg-[#13131d] border border-[#1e1e2e] rounded-md">
                     {notes.length} note{notes.length !== 1 ? 's' : ''}
                   </span>
-                  <button onClick={clearAllNotes}
+                  <button
+                    onClick={clearAllNotes}
                     className="text-[#55557a] hover:text-red-400 p-1.5 rounded-lg border border-[#1e1e2e] hover:border-red-500/30 transition-all"
-                    title="Clear all notes">
+                    title="Clear all notes"
+                  >
                     <Trash2 size={13} />
                   </button>
                 </>
               )}
+
               <button
                 onClick={() => setNoteMode(m => !m)}
-                className={`flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg border border-[#252538] text-[#8888b0] hover:border-[#a78bfa] hover:text-[#c4b5fd] transition-all ${noteMode ? 'note-active' : ''}`}>
+                className={`flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg border border-[#252538] text-[#8888b0] hover:border-[#a78bfa] hover:text-[#c4b5fd] transition-all ${noteMode ? 'note-active' : ''}`}
+              >
                 <StickyNote size={14} />
                 <span>{noteMode ? 'Click PDF to place…' : 'Add note'}</span>
               </button>
               <button
+  onClick={() => setSummariesOpen(s => !s)}
+  className={`flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg border border-[#252538] text-[#8888b0] hover:border-[#a78bfa] hover:text-[#c4b5fd] transition-all ${summariesOpen ? 'note-active' : ''}`}
+>
+  <FileText size={14} />
+  <span>{summariesOpen ? 'Hide summaries' : 'Show summaries'}</span>
+</button>
+
+              <button
+                onClick={() => setChatOpen(c => !c)}
+                className={`flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded-lg border border-[#252538] text-[#8888b0] hover:border-[#a78bfa] hover:text-[#c4b5fd] transition-all ${chatOpen ? 'chat-active' : ''}`}
+              >
+                <MessageCircle size={14} />
+                <span>{chatOpen ? 'Close chat' : 'Chat'}</span>
+              </button>
+
+              <button
                 className="border border-[#252538] text-[#8888b0] hover:border-[#a78bfa] hover:text-[#c4b5fd] text-[12px] px-3 py-1.5 rounded-lg transition-all"
-                onClick={handleReset}>
+                onClick={handleReset}
+              >
                 ← New Upload
               </button>
             </div>
@@ -545,7 +603,8 @@ export default function Dashboard() {
               onClick={() => fileInputRef.current?.click()}
               onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
               onDragLeave={() => setIsDragging(false)}
-              onDrop={handleFileDrop}>
+              onDrop={handleFileDrop}
+            >
               {uploading ? (
                 <div className="flex flex-col items-center gap-3">
                   <Loader2 size={32} className="spin text-[#a78bfa]" />
@@ -560,8 +619,13 @@ export default function Dashboard() {
                   <p className="text-[12px] text-[#3a3a58]">PDF files only · Max 50MB</p>
                 </>
               )}
-              <input ref={fileInputRef} type="file" accept="application/pdf" className="hidden"
-                onChange={(e) => handleFileUpload(e.target.files[0])} />
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="application/pdf"
+                className="hidden"
+                onChange={(e) => handleFileUpload(e.target.files[0])}
+              />
             </div>
 
             {myPdfs.length > 0 && (
@@ -569,9 +633,11 @@ export default function Dashboard() {
                 <p className="text-[10px] font-semibold uppercase tracking-[0.12em] text-[#3a3a58] mb-2.5">Recent uploads</p>
                 <div className="grid grid-cols-2 gap-2">
                   {myPdfs.slice(0, 4).map(pdf => (
-                    <div key={pdf.id}
+                    <div
+                      key={pdf.id}
                       className="recent-card flex items-center gap-2.5 bg-[#12121c] border border-[#1c1c2c] rounded-xl px-3.5 py-3 cursor-pointer transition-colors"
-                      onClick={() => handleLoadExistingPdf(pdf)}>
+                      onClick={() => handleLoadExistingPdf(pdf)}
+                    >
                       <FileText size={15} className="text-[#a78bfa] flex-shrink-0" />
                       <span className="text-[12px] text-[#7878a8] truncate">{pdf.file_name}</span>
                     </div>
@@ -580,88 +646,269 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+
         ) : (
           /* ── PDF VIEW ── */
           <div className="flex-1 flex overflow-hidden fade-up-pdf">
-            <div className="flex-1 flex flex-col overflow-hidden min-w-0">
-              <div className="flex items-center gap-2 px-[18px] py-3.5 border-b border-[#1a1a28] flex-shrink-0">
-                <FileText size={14} className="text-[#a78bfa]" />
-                <span className="text-[12px] font-medium text-[#7878a8] truncate">{activeFileName}</span>
-                {noteMode && (
-                  <span className="ml-auto text-[11px] text-[#a78bfa]" style={{ animation: 'fadeUp 0.2s ease both' }}>
-                    ✦ Click on any page to place a note
-                  </span>
-                )}
+
+            {/* ── Left panel: PDF viewer + summaries ── */}
+            <div
+              style={{
+                display: 'flex',
+                overflow: 'hidden',
+                minWidth: 0,
+                flexBasis: chatOpen ? `${split}%` : '100%',
+                flexShrink: 0,
+                transition: 'flex-basis 0.25s ease',
+              }}
+            >
+              {/* PDF pages */}
+              <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+                <div className="flex items-center gap-2 px-[18px] py-3.5 border-b border-[#1a1a28] flex-shrink-0">
+                  <FileText size={14} className="text-[#a78bfa]" />
+                  <span className="text-[12px] font-medium text-[#7878a8] truncate">{activeFileName}</span>
+                  {noteMode && (
+                    <span className="ml-auto text-[11px] text-[#a78bfa]" style={{ animation: 'fadeUp 0.2s ease both' }}>
+                      ✦ Click on any page to place a note
+                    </span>
+                  )}
+                </div>
+                <PdfViewer
+                  pdfId={pdfId}
+                  notes={notes}
+                  noteMode={noteMode}
+                  onPlaceNote={handlePlaceNote}
+                  onUpdateNote={updateNote}
+                  onDeleteNote={deleteNote}
+                />
               </div>
-              <PdfViewer
-                pdfId={pdfId}
-                notes={notes}
-                noteMode={noteMode}
-                onPlaceNote={handlePlaceNote}
-                onUpdateNote={updateNote}
-                onDeleteNote={deleteNote}
-              />
+
+              <div className="w-px bg-[#1a1a28] flex-shrink-0" />
+
+              {/* Summaries panel */}
+              {summariesOpen && (
+  <div className="w-[320px] flex-shrink-0 flex flex-col overflow-hidden bg-[#10101a]">
+                <div className="flex items-center gap-2 px-[18px] py-3.5 border-b border-[#1a1a28] flex-shrink-0">
+  <span className="text-[12px] font-medium text-[#7878a8]">Section Summaries</span>
+
+  <button
+    onClick={() => setSummariesOpen(false)}
+    className="ml-auto text-[#55557a] hover:text-[#a78bfa] p-1 rounded-md transition-colors"
+  >
+    <X size={14} />
+  </button>
+</div>
+                <div className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-2.5">
+                  {DUMMY_SUMMARIES.map((s, i) => (
+                    <div
+                      key={i}
+                      className="bg-[#14141e] border border-[#1c1c2e] rounded-xl p-3.5"
+                      style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both` }}
+                    >
+                      <div className="flex justify-between items-center mb-1.5">
+                        <span className="text-[11px] font-semibold text-[#a78bfa] tracking-wide">{s.section}</span>
+                        <span className="mono text-[10px] text-[#3a3a58]">p.{s.page}</span>
+                      </div>
+                      <p className="text-[12px] leading-[1.7] text-[#7878a8] font-light">{s.summary}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+          
+              )}
             </div>
 
-            <div className="w-px bg-[#1a1a28] flex-shrink-0" />
-
-            <div className="w-[320px] flex-shrink-0 flex flex-col overflow-hidden bg-[#10101a]">
-              <div className="flex items-center gap-2 px-[18px] py-3.5 border-b border-[#1a1a28] flex-shrink-0">
-                <span className="text-[12px] font-medium text-[#7878a8]">Section Summaries</span>
+            {/* ── Drag handle — lives BETWEEN the two panels ── */}
+            {chatOpen && (
+              <div
+                className="split-handle"
+                onMouseDown={() => { draggingSplit.current = true; }}
+                style={{
+                  width: 8,
+                  flexShrink: 0,
+                  cursor: 'col-resize',
+                  background: 'transparent',
+                  display: 'flex',
+                  alignItems: 'stretch',
+                  justifyContent: 'center',
+                  zIndex: 50,
+                  userSelect: 'none',
+                }}
+              >
+                <div style={{
+                  width: 2,
+                  background: '#1a1a28',
+                  transition: 'background 0.15s',
+                }} />
               </div>
-              <div className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-2.5">
-                {DUMMY_SUMMARIES.map((s, i) => (
-                  <div key={i} className="bg-[#14141e] border border-[#1c1c2e] rounded-xl p-3.5"
-                    style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both` }}>
-                    <div className="flex justify-between items-center mb-1.5">
-                      <span className="text-[11px] font-semibold text-[#a78bfa] tracking-wide">{s.section}</span>
-                      <span className="mono text-[10px] text-[#3a3a58]">p.{s.page}</span>
+            )}
+
+            {/* ── Right panel: Chat ── */}
+            <div
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                background: '#10101a',
+                flexBasis: chatOpen ? `${100 - split}%` : '0%',
+                flexShrink: 0,
+                transition: 'flex-basis 0.25s ease',
+                minWidth: 0,
+              }}
+            >
+              {/* Chat header */}
+              <div className="flex items-center gap-2 px-[18px] py-3.5 border-b border-[#1a1a28] flex-shrink-0">
+                <MessageCircle size={14} className="text-[#a78bfa]" />
+                <span className="text-[12px] font-medium text-[#7878a8] truncate">
+                  {activeFileName ? `Chat — ${activeFileName}` : 'Chat'}
+                </span>
+                {chatMessages.length > 0 && (
+                  <button
+                    onClick={() => setChatMessages([])}
+                    className="ml-auto text-[#55557a] hover:text-red-400 p-1.5 rounded-lg border border-[#1e1e2e] hover:border-red-500/30 transition-all"
+                    title="Clear chat"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
+                {chatLoading && <Loader2 size={12} className="spin text-[#a78bfa] ml-auto" />}
+              </div>
+
+              {/* Messages area */}
+              <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-3" style={{ minWidth: 0 }}>
+
+                {/* Empty state with suggested prompts */}
+                {chatMessages.length === 0 && (
+                  <div className="flex-1 flex flex-col items-center justify-center gap-3 text-center px-8 py-12">
+                    <div style={{
+                      width: 44, height: 44, borderRadius: '50%',
+                      background: 'rgba(167,139,250,0.1)',
+                      border: '1px solid rgba(167,139,250,0.2)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      marginBottom: 4,
+                    }}>
+                      <MessageCircle size={20} style={{ color: '#a78bfa' }} />
                     </div>
-                    <p className="text-[12px] leading-[1.7] text-[#7878a8] font-light">{s.summary}</p>
+                    <p className="text-[14px] font-medium text-[#5a5a7a]">Ask anything about this document</p>
+                    <p className="text-[12px] text-[#3a3a58] mb-2">Try one of these to get started:</p>
+                    <div className="flex flex-col gap-2 w-full max-w-[280px]">
+                      {SUGGESTED_PROMPTS.map(q => (
+                        <button
+                          key={q}
+                          className="prompt-chip text-[12px] text-[#7878a8] border border-[#1e1e2e] rounded-xl px-4 py-2.5 transition-all text-left"
+                          style={{ background: '#13131d' }}
+                          onClick={() => handleSendMessage(q)}
+                        >
+                          {q}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* Message bubbles */}
+                {chatMessages.map((msg, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      display: 'flex',
+                      justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
+                      animation: 'fadeUp 0.18s ease both',
+                    }}
+                  >
+                    {msg.role === 'assistant' && (
+                      <div style={{
+                        width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                        background: 'rgba(167,139,250,0.15)', border: '1px solid rgba(167,139,250,0.25)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        marginRight: 8, marginTop: 2,
+                      }}>
+                        <MessageCircle size={11} style={{ color: '#a78bfa' }} />
+                      </div>
+                    )}
+                    <div style={{
+                      maxWidth: '72%',
+                      padding: '9px 13px',
+                      borderRadius: msg.role === 'user' ? '14px 14px 4px 14px' : '4px 14px 14px 14px',
+                      background: msg.role === 'user' ? '#a78bfa' : '#1a1a2e',
+                      color: msg.role === 'user' ? '#fff' : '#b0b0d0',
+                      fontSize: 12,
+                      lineHeight: 1.7,
+                      border: msg.role === 'assistant' ? '1px solid #252538' : 'none',
+                      wordBreak: 'break-word',
+                    }}>
+                      {msg.content}
+                    </div>
                   </div>
                 ))}
+
+                {/* Typing indicator */}
+                {chatLoading && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <div style={{
+                      width: 22, height: 22, borderRadius: '50%', flexShrink: 0,
+                      background: 'rgba(167,139,250,0.15)', border: '1px solid rgba(167,139,250,0.25)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    }}>
+                      <MessageCircle size={11} style={{ color: '#a78bfa' }} />
+                    </div>
+                    <div style={{
+                      display: 'flex', gap: 5, padding: '10px 14px',
+                      background: '#1a1a2e', border: '1px solid #252538',
+                      borderRadius: '4px 14px 14px 14px',
+                    }}>
+                      {[0, 0.18, 0.36].map((delay, d) => (
+                        <div key={d} style={{
+                          width: 6, height: 6, borderRadius: '50%', background: '#a78bfa',
+                          animation: `pulse 1.2s ease ${delay}s infinite`,
+                        }} />
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div ref={chatEndRef} />
+              </div>
+
+              {/* Input bar */}
+              <div style={{
+                display: 'flex', gap: 8, padding: '12px 16px',
+                borderTop: '1px solid #1a1a28', flexShrink: 0, background: '#10101a',
+              }}>
+                <input
+                  className="chat-input"
+                  style={{
+                    flex: 1, background: '#13131d',
+                    border: '1px solid #252538', borderRadius: 12,
+                    outline: 'none', color: '#e2e2f0', fontSize: 12,
+                    padding: '10px 14px', fontFamily: 'Sora, sans-serif',
+                    transition: 'border-color 0.15s',
+                  }}
+                  placeholder="Ask about the document…"
+                  value={chatMessage}
+                  onChange={(e) => setChatMessage(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSendMessage()}
+                />
+                <button
+                  className="send-btn"
+                  onClick={() => handleSendMessage()}
+                  disabled={!chatMessage.trim() || chatLoading}
+                  style={{
+                    background: chatMessage.trim() && !chatLoading ? '#a78bfa' : '#2a2a3e',
+                    border: 'none', borderRadius: 12, cursor: 'pointer',
+                    color: '#fff', padding: '0 14px',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    transition: 'background 0.15s',
+                    flexShrink: 0,
+                  }}
+                >
+                  <ChevronRight size={16} />
+                </button>
               </div>
             </div>
-          </div>
-        )}
-      </div>
 
-      {/* ── Chat FAB ── */}
-      <div className="fixed bottom-6 right-6 flex flex-col items-end gap-3 z-50">
-        {chatOpen && (
-          <div className="w-[300px] bg-[#16161f] border border-[#26263a] rounded-2xl overflow-hidden"
-            style={{ boxShadow: '0 20px 48px rgba(0,0,0,0.55)', animation: 'fadeUp 0.22s ease both' }}>
-            <div className="flex items-center justify-between px-4 py-3.5 border-b border-[#1c1c2e]">
-              <span className="text-[12px] font-semibold text-[#c0b8e8]">Ask anything</span>
-              <button className="text-[#606080] hover:text-[#a78bfa] transition-colors p-1"
-                onClick={() => setChatOpen(false)}><X size={15} /></button>
-            </div>
-            <div className="px-4 py-5 min-h-[90px]">
-              <p className="text-[12px] text-[#3a3a58] italic">
-                {pdfLoaded ? `Ask about "${activeFileName}"…` : 'Upload a PDF to start chatting.'}
-              </p>
-            </div>
-            <div className="flex border-t border-[#1c1c2e]">
-              <input
-                className="flex-1 bg-transparent border-none outline-none text-[#e2e2f0] text-[12px] px-3.5 py-3"
-                placeholder="Type a question…"
-                value={chatMessage}
-                onChange={(e) => setChatMessage(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && setChatMessage('')}
-              />
-              <button className="bg-[#a78bfa] hover:bg-[#9161f5] text-white px-3.5 flex items-center transition-colors"
-                onClick={() => setChatMessage('')}>
-                <ChevronRight size={16} />
-              </button>
-            </div>
           </div>
         )}
-        <button
-          className="w-[46px] h-[46px] rounded-full bg-[#a78bfa] hover:bg-[#9161f5] text-white flex items-center justify-center transition-all hover:scale-105 hover:shadow-[0_10px_28px_rgba(167,139,250,0.45)]"
-          style={{ boxShadow: '0 8px 24px rgba(167,139,250,0.35)' }}
-          onClick={() => setChatOpen(!chatOpen)}>
-          {chatOpen ? <X size={20} /> : <MessageCircle size={20} />}
-        </button>
       </div>
     </div>
   );
