@@ -9,3 +9,5 @@ python-multipart
 pydantic
 pymupdf
 pdf2image
+google-genai>=1.0.0
+Pillow>=10.0.0

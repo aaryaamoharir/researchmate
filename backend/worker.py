@@ -1,8 +1,7 @@
 import asyncio
 from main import SessionLocal
 from main import PDF_Pages
-from agent.tools.summarize import generate_summary #whatever the agent path is
-
+from summarize import generate_summary                                        
 
 def call_agent(page):
     return generate_summary(page.supabase_path) #filler, cahnge later
@@ -16,6 +15,7 @@ async def summary_worker():
             pages = (
                 db.query(PDF_Pages)
                 .filter(PDF_Pages.summary == "empty")
+                .filter(PDF_Pages.supabase_path != None)
                 .limit(5)
                 .all()
             )
@@ -25,11 +25,12 @@ async def summary_worker():
                 db.commit()
 
                 try:
-                    call_agent(page) #calls agent and stores in db
+                    page.summary = call_agent(page)
+                    db.commit()
 
                 except Exception as e:
                     print("Error:", e)
-                    page.summary = "failed" #create a failed state, or we can just switch back to empty(saves time)
+                    page.summary = "failed"
                     db.commit()
 
                 
