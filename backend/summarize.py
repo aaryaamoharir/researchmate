@@ -80,7 +80,6 @@ def _call_gemini(image: Image.Image, pdf_name: str, page_num: int, max_retries: 
                 config=types.GenerateContentConfig(
                     temperature=0.3,
                     max_output_tokens=1024,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             return response.text or ""

@@ -422,6 +422,52 @@ def get_pdf(id : int, db : Session = Depends(get_db), current_user = Depends(ver
         filename=pdf.file_name 
     )
 
+# ── Chat endpoint ──────────────────────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    pdf_id: int | None = None
+    messages: list[ChatMessage]
+
+class ChatResponse(BaseModel):
+    reply: str
+
+@app.post("/chat", response_model=ChatResponse)
+def chat_endpoint(
+    req: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(verify_token),
+):
+    """Ask a question about a paper (or all papers). Uses the RAG pipeline."""
+    # If pdf_id is provided, verify the user owns it
+    if req.pdf_id is not None:
+        pdf = db.query(PDF).filter(PDF.id == req.pdf_id).first()
+        if pdf is None:
+            raise HTTPException(status_code=404, detail="PDF not found")
+        if str(pdf.user_id) != current_user["sub"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this PDF")
+
+    # Extract the latest user message as the query
+    question = ""
+    for msg in reversed(req.messages):
+        if msg.role == "user":
+            question = msg.content
+            break
+
+    if not question:
+        raise HTTPException(status_code=400, detail="No user message found")
+
+    # Pass full conversation history so the LLM can follow up
+    messages_dicts = [{"role": m.role, "content": m.content} for m in req.messages]
+
+    from agent import chat
+    answer = chat(question, pdf_id=req.pdf_id, messages=messages_dicts)
+    return ChatResponse(reply=answer)
+
+
 #Summary Data Contracts
 class SummaryRequest(BaseModel):
     pdf_id : int
