@@ -15,19 +15,37 @@ from dotenv import load_dotenv
 from supabase import create_client, Client
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from jose import jwt, JWTError
 from pdf2image import convert_from_path
 from PIL import Image
+from contextlib import asynccontextmanager
+import asyncio
+
+from db import SessionLocal, engine
+from models import PDF, PDF_Pages, Summary, StickyNote, Base
 
 
 from fastapi.middleware.cors import CORSMiddleware
 
 
 
+from worker import summary_worker
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(summary_worker())
 
-app = FastAPI()
+    yield  # app runs here
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(lifespan=lifespan)
+
 
 # Add this right after app = FastAPI()
 app.add_middleware(
@@ -50,25 +68,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Initialize SQLAlchemy for Database Operations
-DATABASE_URL = os.getenv("DATABASE_URL")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
- 
-class StickyNote(Base):
-    __tablename__ = "sticky_notes"
-    id         = Column(Integer, primary_key=True, index=True)
-    user_id    = Column(UUID(as_uuid=True), index=True)
-    pdf_id     = Column(Integer, ForeignKey("pdfs.id", ondelete="CASCADE"))
-    page_number = Column(Integer)
-    text       = Column(Text, default="")
-    x          = Column(Integer)          # px offset from page left
-    y          = Column(Integer)          # px offset from page top
-    color_idx  = Column(Integer, default=0)
-    created_at = Column(DateTime, default=datetime.utcnow)
- 
-    pdf = relationship("PDF")
  
  
 # 2. ADD THESE PYDANTIC SCHEMAS (alongside your other response models)
@@ -99,38 +98,6 @@ class StickyNoteResponse(BaseModel):
     created_at:  datetime
  
     model_config = ConfigDict(from_attributes=True)
- 
-class PDF(Base):
-    __tablename__ = "pdfs"
-    id = Column(Integer, primary_key = True, index = True)
-    user_id = Column(UUID(as_uuid=True), index=True)
-    file_name = Column(String)
-    storage_path = Column(String)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    supabase_path = Column(String, nullable=True)  
-
-    summaries = relationship("Summary", back_populates="pdf")
-    pdf_pages = relationship("PDF_Pages", back_populates="pdf")
-
-class Summary(Base):
-    __tablename__ = "summaries"
-    id = Column(Integer, primary_key = True, index = True)
-    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
-    summary = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    pdf = relationship("PDF", back_populates="summaries")
-    #Create a model used var as well
-
-class PDF_Pages(Base):
-    __tablename__ = "pdf_pages"
-    id = Column(Integer, primary_key = True, index = True)
-    pdf_id = Column(Integer, ForeignKey("pdfs.id"))
-    image_path = Column(String) #where to store the images
-    created_at = Column(DateTime, default=datetime.utcnow)
-    supabase_path = Column(String, nullable=True)  
-    page_number = Column(Integer) 
-    summary = Column(String)
-    pdf = relationship("PDF", back_populates="pdf_pages")
 
 
 Base.metadata.create_all(bind=engine)
@@ -375,6 +342,7 @@ class PDFPageResponse(BaseModel):
     pdf_id: int
     image_path: str
     page_number: int 
+    summary: str
     created_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
@@ -621,24 +589,9 @@ def delete_note(
 
 
 #background worker
-from contextlib import asynccontextmanager
-from fastapi import FastAPI
-import asyncio
-from worker import summary_worker
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    task = asyncio.create_task(summary_worker())
 
-    yield  # app runs here
 
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-app = FastAPI(lifespan=lifespan)
 
 #backup if no work
 #@app.on_event("startup")

@@ -1,11 +1,11 @@
 import asyncio
-from main import SessionLocal
-from main import PDF_Pages
-from summarize import generate_summary                                        
+from models import PDF_Pages
+from summarize import generate_summary        
+from db import SessionLocal
+
 
 def call_agent(page):
     return generate_summary(page.supabase_path) #filler, cahnge later
-
 
 async def summary_worker():
     while True:
@@ -38,4 +38,4 @@ async def summary_worker():
         finally:
             db.close()
 
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)  # Sleep for a while before checking for new pages

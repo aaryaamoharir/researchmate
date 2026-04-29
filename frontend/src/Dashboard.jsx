@@ -226,18 +226,7 @@ function AuthImage({ src, alt, style }) {
   );
   return <img src={blobUrl} alt={alt} style={style} />;
 }
-
-// ─── Dummy summaries ──────────────────────────────────────────────────────────
-const DUMMY_SUMMARIES = [
-  { section: "Abstract",     summary: "Novel framework for large-scale distributed systems addressing latency and fault-tolerance in cloud-native environments.", page: 1 },
-  { section: "Introduction", summary: "Highlights 3× data throughput requirements for modern apps; introduces a new consensus algorithm and adaptive load-balancer.", page: 2 },
-  { section: "Related Work", summary: "Surveys Raft, Paxos, ZooKeeper; identifies gaps in partial-failure recovery and cross-region consistency.", page: 4 },
-  { section: "Methodology",  summary: "Two-phase commit variant with optimistic locking. Gossip protocol reduces coordination overhead by ~40%.", page: 7 },
-  { section: "Evaluation",   summary: "200-node cluster across 3 AWS regions. 99.95% uptime under network partitions; 12 ms median latency — 2.1× better than baseline.", page: 11 },
-  { section: "Discussion",   summary: "Limitations in WAN >300 ms RTT. Future: GPU-accelerated consensus for ML workloads.", page: 15 },
-  { section: "Conclusion",   summary: "Adaptive consensus + gossip heartbeats significantly improves resilience without sacrificing throughput.", page: 17 },
-];
-
+//Prompts to use for chatbot
 const SUGGESTED_PROMPTS = [
   'Summarise the methodology',
   'What are the main findings?',
@@ -260,6 +249,10 @@ export default function Dashboard() {
   const [nextColor, setNextColor]       = useState(0);
   const [notesLoading, setNotesLoading] = useState(false);
 
+  // Summaries
+  const [summaries, setSummaries] = useState([]);
+  const [summariesLoading, setSummariesLoading] = useState(false);
+
   // Chat
   const [chatOpen, setChatOpen]         = useState(false);
   const [summariesOpen, setSummariesOpen] = useState(true);
@@ -281,7 +274,11 @@ export default function Dashboard() {
     setNotes([]);
     setNoteMode(false);
     setChatMessages([]);
-    if (pdfId) loadNotesForPdf(pdfId);
+    setSummaries([]);
+    if (pdfId) {
+      loadNotesForPdf(pdfId);
+      loadSummaries(pdfId);
+    }
   }, [pdfId]);
 
   useEffect(() => {
@@ -334,6 +331,25 @@ export default function Dashboard() {
       console.error('Failed to load notes:', err);
     } finally {
       setNotesLoading(false);
+    }
+  };
+
+  // Generating SUmmaries
+  const loadSummaries = async (id) => {
+    setSummariesLoading(true);
+    try {
+      const res = await fetch(`${API}/pdf/${id}/pages`, { headers: authHeaders() });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSummaries(data.map(s => ({
+        section: `Page ${s.page_number}`,
+        summary: s.summary,
+        page: s.page_number,
+      })));
+    } catch (err) {
+      console.error('Failed to load summaries:', err);
+    } finally {
+      setSummariesLoading(false);
     }
   };
 
@@ -699,19 +715,21 @@ export default function Dashboard() {
   </button>
 </div>
                 <div className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-2.5">
-                  {DUMMY_SUMMARIES.map((s, i) => (
-                    <div
-                      key={i}
-                      className="bg-[#14141e] border border-[#1c1c2e] rounded-xl p-3.5"
-                      style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both` }}
-                    >
-                      <div className="flex justify-between items-center mb-1.5">
-                        <span className="text-[11px] font-semibold text-[#a78bfa] tracking-wide">{s.section}</span>
-                        <span className="mono text-[10px] text-[#3a3a58]">p.{s.page}</span>
-                      </div>
-                      <p className="text-[12px] leading-[1.7] text-[#7878a8] font-light">{s.summary}</p>
-                    </div>
-                  ))}
+                  {summariesLoading
+                      ? <div style={{display:'flex',justifyContent:'center',paddingTop:24}}>
+                          <Loader2 size={20} className="spin" style={{color:'#a78bfa'}}/>
+                        </div>
+                      : summaries.map((s, i) => (
+                          <div key={i} className="bg-[#14141e] border border-[#1c1c2e] rounded-xl p-3.5"
+                              style={{ animation: `fadeUp 0.3s ease ${i * 0.05}s both` }}>
+                              <div className="flex justify-between items-center mb-1.5">
+                              <span className="text-[11px] font-semibold text-[#a78bfa] tracking-wide">{s.section}</span>
+                              <span className="mono text-[10px] text-[#3a3a58]">p.{s.page}</span>
+                            </div>
+                            <p className="text-[12px] leading-[1.7] text-[#7878a8] font-light">{s.summary}</p>
+                          </div>
+                        ))
+                    }
                 </div>
               </div>
           
