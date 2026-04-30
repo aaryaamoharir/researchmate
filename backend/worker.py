@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 from PIL import Image
 from models import PDF_Pages, PDF
@@ -8,6 +9,8 @@ from summarize import generate_summary
 from db import SessionLocal
 
 logger = logging.getLogger(__name__)
+
+_executor = ThreadPoolExecutor(max_workers=5)
 
 
 def call_agent(page):
@@ -39,6 +42,22 @@ def embed_page(page, db):
     )
 
 
+def _summarize_page(page_id: int) -> tuple[int, str]:
+    """Summarize a single page in a thread. Returns (page_id, summary)."""
+    db = SessionLocal()
+    try:
+        page = db.query(PDF_Pages).filter(PDF_Pages.id == page_id).first()
+        if not page:
+            return page_id, "failed"
+        summary = call_agent(page)
+        return page_id, summary
+    except Exception as e:
+        logger.error("Summarization error for page %d: %s", page_id, e)
+        return page_id, "failed"
+    finally:
+        db.close()
+
+
 async def summary_worker():
     while True:
         db = SessionLocal()
@@ -48,30 +67,41 @@ async def summary_worker():
                 db.query(PDF_Pages)
                 .filter(PDF_Pages.summary == "empty")
                 .filter(PDF_Pages.supabase_path != None)
-                .limit(5)
+                .limit(10)
                 .all()
             )
 
+            if not pages:
+                await asyncio.sleep(2)
+                continue
+
+            # Mark all as processing
+            page_ids = []
             for page in pages:
                 page.summary = "processing"
+                page_ids.append(page.id)
+            db.commit()
+
+            # Summarize concurrently via thread pool
+            loop = asyncio.get_event_loop()
+            tasks = [loop.run_in_executor(_executor, _summarize_page, pid) for pid in page_ids]
+            results = await asyncio.gather(*tasks)
+
+            # Update summaries and embed
+            for page_id, summary in results:
+                page = db.query(PDF_Pages).filter(PDF_Pages.id == page_id).first()
+                if not page:
+                    continue
+                page.summary = summary
                 db.commit()
 
-                try:
-                    page.summary = call_agent(page)
-                    db.commit()
-
-                    # Embed the page into Qdrant after successful summarization
+                if summary not in ("failed", "processing", "empty"):
                     try:
                         embed_page(page, db)
                     except Exception as e:
                         logger.warning("Embedding failed for page %d: %s", page.id, e)
 
-                except Exception as e:
-                    logger.error("Summarization error: %s", e)
-                    page.summary = "failed"
-                    db.commit()
-
         finally:
             db.close()
 
-        await asyncio.sleep(5)
+        await asyncio.sleep(1)
